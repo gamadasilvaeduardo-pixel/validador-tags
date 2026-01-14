@@ -1,3 +1,5 @@
+// app.js
+
 // ====== CONFIG ======
 const DEFAULT_API_URL = "https://script.google.com/macros/s/AKfycbyOgDi-hPNxHOfwTp66Ks1lKKcQ4LsOS9HquvZ8iBqeU3YVxz2gwnTWeUk9HcACvH8X0A/exec";
 const SYNC_MINUTES_DEFAULT = 60;
@@ -8,8 +10,11 @@ const $ = (id) => document.getElementById(id);
 const state = {
   apiUrl: localStorage.getItem("apiUrl") || DEFAULT_API_URL,
   deviceId: localStorage.getItem("deviceId") || crypto.randomUUID(),
+
   base: new Map(), // tag -> {status,setor,classe}
-  queue: [], // eventos pendentes [{...}]
+  queue: [],
+
+  // HOLD: currentTag != null => travado ate acao
   currentTag: null,
   allowActions: false,
 
@@ -30,6 +35,10 @@ localStorage.setItem("deviceId", state.deviceId);
 function log(msg) {
   const el = $("log");
   el.textContent = `[${new Date().toLocaleString()}] ${msg}\n` + el.textContent;
+}
+function toast(msg) {
+  log(msg);
+  // se quiser, troca por toast bonitinho depois
 }
 function setNet() {
   $("net").textContent = navigator.onLine ? "ONLINE" : "OFFLINE";
@@ -64,11 +73,11 @@ function loadBaseCache() {
   }
 }
 
-// ====== GEO (sempre com ponto) ======
+// ====== GEO (COM VIRGULA) ======
 function normCoord(v) {
   if (v === null || v === undefined || v === "") return "";
-  // Garante ponto e string
-  return String(v).trim().replace(",", ".");
+  // Garante virgula e string
+  return String(v).trim().replace(/\./g, ",");
 }
 
 async function getGeo() {
@@ -108,28 +117,98 @@ async function atualizarBase() {
   log(`Base OK. Tags ativas: ${state.base.size}`);
 }
 
-// ====== TAG LOAD / UI ======
-function showTag(tag) {
-  state.currentTag = tag;
-  $("tagLida").value = tag || "";
+// ====== STATUS NORMALIZE ======
+function normStatus(s) {
+  return String(s || "").trim().toUpperCase();
+}
 
+// Mapeia strings que vem da base/servidor vs UI
+function uiToBaseStatus(uiStatus) {
+  // UI usa PENDENTE_OBRA e SEM_ACESSO (com underscore)
+  if (uiStatus === "PENDENTE_OBRA") return "PENDENTE OBRA";
+  if (uiStatus === "SEM_ACESSO") return "SEM ACESSO";
+  return uiStatus;
+}
+function baseToUiStatus(baseStatus) {
+  const s = normStatus(baseStatus).replace(/\s+/g, " ");
+  if (s === "PENDENTE OBRA") return "PENDENTE_OBRA";
+  if (s === "SEM ACESSO") return "SEM_ACESSO";
+  return s;
+}
+
+// ====== HOLD / UI ======
+function updateActionButtonsForTag(tag) {
   const info = state.base.get(tag);
+  const baseStatus = info ? String(info.status || "PENDENTE") : "NAO CADASTRADA";
+  const stNorm = normStatus(baseStatus).replace(/\s+/g, " ");
+
+  const btnConcluido = $("btnConcluido");
+  const btnPendente = $("btnPendente");
+  const btnObra = $("btnObra");
+  const btnSemAcesso = $("btnSemAcesso");
+  const btnGeo = $("btnGeo");
+
+  // defaults
+  btnConcluido.disabled = false;
+  btnObra.disabled = false;
+  btnSemAcesso.disabled = false;
+
+  // PENDENTE: só aparece quando status atual != PENDENTE (e cadastrada)
+  const isCadastrada = !!info;
+  const isPendente = (stNorm === "PENDENTE");
+  btnPendente.style.display = (isCadastrada && !isPendente) ? "inline-block" : "none";
+  btnPendente.disabled = false;
+
+  // Atualizar geoloc: só aparece quando status atual = CONCLUIDO
+  const isConcluido = (stNorm === "CONCLUIDO");
+  btnGeo.style.display = (isCadastrada && isConcluido) ? "inline-block" : "none";
+
+  // Desabilitar botão do status atual sempre que status atual != PENDENTE
+  // (e também garante concluido disabled quando já concluido)
+  if (isCadastrada && !isPendente) {
+    const uiStatus = baseToUiStatus(stNorm);
+
+    if (uiStatus === "CONCLUIDO") btnConcluido.disabled = true;
+    if (uiStatus === "PENDENTE_OBRA") btnObra.disabled = true;
+    if (uiStatus === "SEM_ACESSO") btnSemAcesso.disabled = true;
+    // PENDENTE não é o status atual aqui (pq !isPendente), então fica habilitado
+  }
+
+  // Se não cadastrada: não tem status confiável — deixa tudo visível menos GEO e PENDENTE
+  if (!isCadastrada) {
+    btnPendente.style.display = "none";
+    btnGeo.style.display = "none";
+  }
+}
+
+function showTag(tag) {
+  const t = String(tag || "").trim();
+  if (!t) return;
+
+  // ✅ HOLD: se já tem tag em atendimento, não aceita outra diferente
+  if (state.currentTag && state.currentTag !== t) {
+    alert(`TAG em atendimento: ${state.currentTag}\nFinalize uma ação ou clique "LER NOVAMENTE".`);
+    return;
+  }
+
+  state.currentTag = t;
+  $("tagLida").value = t;
+
+  const info = state.base.get(t);
   if (!info) {
     $("statusAtual").textContent = "NAO CADASTRADA";
     $("setorAtual").textContent = "-";
     $("classeAtual").textContent = "-";
-    state.allowActions = true;
-    $("acoesBox").style.display = "block";
-    return;
+  } else {
+    $("statusAtual").textContent = info.status || "PENDENTE";
+    $("setorAtual").textContent = info.setor || "-";
+    $("classeAtual").textContent = info.classe || "-";
   }
 
-  $("statusAtual").textContent = info.status || "PENDENTE";
-  $("setorAtual").textContent = info.setor || "-";
-  $("classeAtual").textContent = info.classe || "-";
-
-  // Agora SEM bloqueio. A confirmação acontece no clique do status.
   state.allowActions = true;
   $("acoesBox").style.display = "block";
+
+  updateActionButtonsForTag(t);
 }
 
 function clearTag() {
@@ -141,32 +220,42 @@ function clearTag() {
   $("acoesBox").style.display = "none";
 }
 
+// Ler novamente: NÃO destrava (continua hold), só recarrega da base/cache
+function lerNovamente() {
+  if (!state.currentTag) return;
+  // força re-render e regrinhas
+  showTag(state.currentTag);
+}
+
 // ====== EVENT CREATE ======
-async function criarEvento(status) {
+async function criarEvento(novoStatusUI, opts = {}) {
   if (!state.currentTag) {
     alert("Nenhuma TAG carregada.");
     return;
   }
+
   const tag = state.currentTag;
   const geo = await getGeo();
+
+  const statusBase = uiToBaseStatus(String(novoStatusUI || "").trim());
 
   const ev = {
     event_id: crypto.randomUUID(),
     timestamp_iso: new Date().toISOString(),
     tag,
-    status,
-    usuario: "campo",   // depois a gente troca por login/pin
-    lat: geo.lat,       // string com ponto
-    lon: geo.lon,       // string com ponto
+    status: statusBase,
+    usuario: "campo",   // depois você troca por login
+    lat: geo.lat,       // ✅ com virgula
+    lon: geo.lon,       // ✅ com virgula
     accuracy: geo.accuracy,
     device_id: state.deviceId,
-    obs: ""
+    obs: opts.obs || ""
   };
 
-  // Atualiza status local (cache) para refletir na tela e usar na próxima confirmação
+  // Atualiza cache local (status) — inclusive pra geo update (status igual)
   const info = state.base.get(tag);
   if (info) {
-    info.status = status;
+    info.status = statusBase;
     state.base.set(tag, info);
     saveBaseCache();
   }
@@ -174,49 +263,56 @@ async function criarEvento(status) {
   // fila offline
   state.queue.unshift(ev);
   saveQueue();
-  log(`Evento salvo offline: ${tag} -> ${status} (GPS acc=${geo.accuracy})`);
+  log(`Evento salvo offline: ${tag} -> ${statusBase} (acc=${geo.accuracy})`);
 
+  // Ao executar uma ação de status / geo update, destrava para próxima tag
   clearTag();
+
+  // tenta sync imediato se online
+  if (navigator.onLine) sync().catch(e => log("Erro sync: " + e));
 }
 
-// ====== CONFIRMACOES (como voce pediu) ======
-function getStatusAtualDaTag_(tag) {
-  const info = state.base.get(tag);
-  if (!info) return null; // nao cadastrada
-  return String(info.status || "PENDENTE").trim();
-}
-
-async function confirmarEEnviar_(novoStatus) {
+// ====== REGRAS DE CONFIRMACAO ======
+// ✅: só confirma quando muda de CONCLUIDO -> qualquer outro
+async function enviarComRegraConfirmacao_(novoStatusUI) {
   if (!state.currentTag) return;
 
   const tag = state.currentTag;
-  const statusAtual = getStatusAtualDaTag_(tag);
+  const info = state.base.get(tag);
 
-  // TAG nao cadastrada: nao tem "status anterior" confiavel
-  if (statusAtual === null) {
-    await criarEvento(novoStatus);
-    if (navigator.onLine) sync().catch(e => log("Erro sync: " + e));
+  // Se não cadastrada, manda direto (sem confirmação)
+  if (!info) {
+    await criarEvento(novoStatusUI);
     return;
   }
 
-  const atual = String(statusAtual).toUpperCase();
-  const novo = String(novoStatus).toUpperCase();
+  const atualBase = String(info.status || "PENDENTE");
+  const atualNorm = normStatus(atualBase).replace(/\s+/g, " ");
+  const novoBase = uiToBaseStatus(novoStatusUI);
+  const novoNorm = normStatus(novoBase).replace(/\s+/g, " ");
 
-  // 1) MESMO STATUS: perguntar se quer atualizar geolocalizacao
-  if (novo === atual) {
-    const ok = confirm("TAG ja validada, atualizar geolocalizacao?");
+  // ✅ Só pede confirmação se ESTÁ CONCLUIDO e quer mudar pra outro
+  if (atualNorm === "CONCLUIDO" && novoNorm !== "CONCLUIDO") {
+    const ok = confirm(`Confirmar mudanca de status?\nDe: ${atualBase}\nPara: ${novoBase}`);
     if (!ok) return;
-    await criarEvento(novoStatus); // grava de novo com mesmo status (GPS novo)
-    if (navigator.onLine) sync().catch(e => log("Erro sync: " + e));
-    return;
   }
 
-  // 2) STATUS DIFERENTE: confirmar mudanca de status
-  const ok = confirm(`Confirmar mudanca de status?\nDe: ${statusAtual}\nPara: ${novoStatus}`);
-  if (!ok) return;
+  // ✅ PENDENTE -> CONCLUIDO: SEM confirmação (cai aqui direto)
+  await criarEvento(novoStatusUI);
+}
 
-  await criarEvento(novoStatus);
-  if (navigator.onLine) sync().catch(e => log("Erro sync: " + e));
+// Atualizar geoloc (apenas quando status atual = CONCLUIDO)
+async function atualizarGeoloc_() {
+  if (!state.currentTag) return;
+  const tag = state.currentTag;
+  const info = state.base.get(tag);
+  if (!info) return;
+
+  const atualNorm = normStatus(info.status).replace(/\s+/g, " ");
+  if (atualNorm !== "CONCLUIDO") return;
+
+  // grava novo evento com mesmo status (CONCLUIDO) e GPS novo
+  await criarEvento("CONCLUIDO", { obs: "ATUALIZAR_GEOLOC" });
 }
 
 // ====== SYNC ======
@@ -232,7 +328,7 @@ async function sync() {
   }
 
   // manda em lotes de 50
-  const batch = state.queue.slice(-50); // pega os mais antigos do fim
+  const batch = state.queue.slice(-50); // mais antigos do fim
   const payload = {
     device_id: state.deviceId,
     usuario: "campo",
@@ -241,14 +337,14 @@ async function sync() {
 
   log(`Sync: enviando lote ${batch.length}...`);
 
-  // Mantemos no-cors (como estava), para funcionar no GitHub Pages sem dor de cabeca
+  // no-cors para GitHub Pages
   await fetch(state.apiUrl, {
     method: "POST",
     mode: "no-cors",
     body: JSON.stringify(payload)
   });
 
-  // Remove o lote enviado (assumindo sucesso). Dedup no servidor por event_id evita duplicar.
+  // remove lote enviado
   state.queue = state.queue.slice(0, Math.max(0, state.queue.length - batch.length));
   saveQueue();
   setLastSync(new Date().toISOString());
@@ -325,11 +421,19 @@ async function scanLoop() {
       if (barcodes && barcodes.length) {
         const val = String(barcodes[0].rawValue || "").trim();
         const now = Date.now();
+
+        // throttling
         if (val && (val !== state.cam.lastValue || (now - state.cam.lastAt) > 2000)) {
           state.cam.lastValue = val;
           state.cam.lastAt = now;
-          log("QR lido: " + val);
-          showTag(val);
+
+          // ✅ HOLD: se já tem tag em atendimento e for diferente, ignora
+          if (state.currentTag && state.currentTag !== val) {
+            log(`QR ignorado (HOLD ativo): lido=${val}, em_atendimento=${state.currentTag}`);
+          } else {
+            log("QR lido: " + val);
+            showTag(val);
+          }
         }
       }
     } catch (e) {}
@@ -389,17 +493,21 @@ async function init() {
 
   $("btnCarregarManual").onclick = () => {
     const t = $("tagManual").value.trim();
-    if (t) showTag(t);
+    if (!t) return;
+    showTag(t);
   };
 
-  $("btnLerNovamente").onclick = () => clearTag();
+  $("btnLerNovamente").onclick = () => lerNovamente();
 
-  // Clique nos status: agora faz confirmacao conforme regra
+  // Atualizar geoloc (somente para concluido)
+  $("btnGeo").onclick = () => atualizarGeoloc_().catch(e => log("Erro geo: " + e));
+
+  // Clique nos status (com regra de confirmacao CONCLUIDO->outro)
   document.querySelectorAll("button[data-status]").forEach(btn => {
     btn.addEventListener("click", async () => {
       if (!state.allowActions) return;
-      const status = btn.getAttribute("data-status");
-      await confirmarEEnviar_(status);
+      const statusUI = btn.getAttribute("data-status");
+      await enviarComRegraConfirmacao_(statusUI);
     });
   });
 
