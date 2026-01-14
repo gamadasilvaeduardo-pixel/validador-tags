@@ -1,11 +1,14 @@
+<!-- index.html -->
 <!doctype html>
 <html lang="pt-br">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Validador de TAGs</title>
+
   <link rel="manifest" href="manifest.json">
   <meta name="theme-color" content="#111111">
+
   <style>
     body { font-family: Arial, sans-serif; margin: 14px; }
     .row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
@@ -21,8 +24,19 @@
     .ok { color:#15803d; font-weight: 700; }
     .danger { color:#b91c1c; font-weight: 700; }
     .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; white-space: pre-wrap; }
+
+    /* ====== CORES BOTOES ====== */
+    .btn { border:0; border-radius: 12px; font-weight: 800; }
+    .btn:disabled { opacity:.45; cursor:not-allowed; }
+    .btn-concluido { background:#16a34a; color:#fff; }
+    .btn-pendente  { background:#facc15; color:#111; }
+    .btn-obra      { background:#f97316; color:#fff; }
+    .btn-semacesso { background:#dc2626; color:#fff; }
+    .btn-geo       { background:#2563eb; color:#fff; }
+    .btn-sec       { background:#6b7280; color:#fff; }
   </style>
 </head>
+
 <body>
   <h2>Validador de TAGs (Campo)</h2>
 
@@ -40,12 +54,13 @@
   <div class="card">
     <h3>Scanner QR</h3>
     <video id="video" playsinline></video>
+
     <div class="row" style="margin-top:10px;">
       <button id="btnStartCam" class="big">Iniciar camera</button>
       <button id="btnStopCam" class="big">Parar camera</button>
     </div>
 
-    <p style="margin-top:10px;"><b>TAG lida</b></p>
+    <p style="margin-top:10px;"><b>TAG em atendimento</b></p>
     <input id="tagLida" placeholder="Aguardando leitura..." readonly />
 
     <p class="muted">
@@ -57,10 +72,18 @@
     <div id="acoesBox" style="display:none;">
       <p><b>Selecione o resultado:</b></p>
       <div class="btns">
-        <button data-status="CONCLUIDO" class="big">CONCLUIDO</button>
-        <button data-status="PENDENTE_OBRA" class="big">PENDENTE OBRA</button>
-        <button data-status="SEM_ACESSO" class="big">SEM ACESSO</button>
-        <button id="btnLerNovamente" class="big">Ler novamente</button>
+        <button id="btnConcluido" data-status="CONCLUIDO" class="big btn btn-concluido">CONCLUIDO</button>
+
+        <!-- PENDENTE: só aparece quando status atual != PENDENTE -->
+        <button id="btnPendente" data-status="PENDENTE" class="big btn btn-pendente" style="display:none;">PENDENTE</button>
+
+        <button id="btnObra" data-status="PENDENTE_OBRA" class="big btn btn-obra">PENDENTE OBRA</button>
+        <button id="btnSemAcesso" data-status="SEM_ACESSO" class="big btn btn-semacesso">SEM ACESSO</button>
+
+        <!-- Atualizar geoloc: só aparece quando status atual = CONCLUIDO -->
+        <button id="btnGeo" class="big btn btn-geo" style="display:none;">ATUALIZAR GEOLOC</button>
+
+        <button id="btnLerNovamente" class="big btn btn-sec">LER NOVAMENTE</button>
       </div>
       <p class="muted">GPS é capturado no clique do botão.</p>
     </div>
