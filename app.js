@@ -1,7 +1,5 @@
-// app.js
-
 // ====== CONFIG ======
-const DEFAULT_API_URL = "https://script.google.com/macros/s/AKfycbyOgDi-hPNxHOfwTp66Ks1lKKcQ4LsOS9HquvZ8iBqeU3YVxz2gwnTWeUk9HcACvH8X0A/exec";
+const DEFAULT_API_URL = "https://script.google.com/macros/s/SEU_ID/exec";
 const SYNC_MINUTES_DEFAULT = 60;
 
 // ====== STATE ======
@@ -11,10 +9,15 @@ const state = {
   apiUrl: localStorage.getItem("apiUrl") || DEFAULT_API_URL,
   deviceId: localStorage.getItem("deviceId") || crypto.randomUUID(),
 
+  // sessão
+  login: localStorage.getItem("login") || "",
+  nomeCompleto: localStorage.getItem("nomeCompleto") || "",
+  loggedIn: localStorage.getItem("loggedIn") === "1",
+
   base: new Map(), // tag -> {status,setor,classe}
   queue: [],
 
-  // HOLD: currentTag != null => travado ate acao
+  // HOLD: currentTag != null => travado ate acao (status/geo)
   currentTag: null,
   allowActions: false,
 
@@ -34,52 +37,91 @@ localStorage.setItem("deviceId", state.deviceId);
 // ====== UI HELPERS ======
 function log(msg) {
   const el = $("log");
+  if (!el) return;
   el.textContent = `[${new Date().toLocaleString()}] ${msg}\n` + el.textContent;
 }
-function toast(msg) {
-  log(msg);
-  // se quiser, troca por toast bonitinho depois
-}
-function setNet() {
-  $("net").textContent = navigator.onLine ? "ONLINE" : "OFFLINE";
-}
-function setFila() {
-  $("filaCount").textContent = String(state.queue.length);
-}
+function setNet() { $("net").textContent = navigator.onLine ? "ONLINE" : "OFFLINE"; }
+function setFila() { $("filaCount").textContent = String(state.queue.length); }
 function setLastSync(ts) {
   state.lastSyncAt = ts || "";
   localStorage.setItem("lastSyncAt", state.lastSyncAt);
   $("lastSync").textContent = state.lastSyncAt ? new Date(state.lastSyncAt).toLocaleString() : "-";
 }
-function saveQueue() {
-  localStorage.setItem("queue", JSON.stringify(state.queue));
-  setFila();
-}
+function saveQueue() { localStorage.setItem("queue", JSON.stringify(state.queue)); setFila(); }
 function loadQueue() {
   try { state.queue = JSON.parse(localStorage.getItem("queue") || "[]"); }
   catch { state.queue = []; }
   setFila();
 }
-function saveBaseCache() {
-  const arr = Array.from(state.base.entries());
-  localStorage.setItem("baseCache", JSON.stringify(arr));
-}
+function saveBaseCache() { localStorage.setItem("baseCache", JSON.stringify(Array.from(state.base.entries()))); }
 function loadBaseCache() {
-  try {
-    const arr = JSON.parse(localStorage.getItem("baseCache") || "[]");
-    state.base = new Map(arr);
-  } catch {
-    state.base = new Map();
+  try { state.base = new Map(JSON.parse(localStorage.getItem("baseCache") || "[]")); }
+  catch { state.base = new Map(); }
+}
+
+// ====== LOGIN UI ======
+function renderAuthUI() {
+  $("whoami").textContent = state.loggedIn ? (state.login || "-") : "-";
+  $("btnLogout").style.display = state.loggedIn ? "inline-block" : "none";
+  $("appArea").style.display = state.loggedIn ? "block" : "none";
+  $("loginHint").textContent = state.loggedIn
+    ? `Ok. ${state.nomeCompleto ? "Bem-vindo, " + state.nomeCompleto + "." : ""}`
+    : "Faça login para liberar o app.";
+}
+
+function logout() {
+  state.loggedIn = false;
+  state.login = "";
+  state.nomeCompleto = "";
+  localStorage.setItem("loggedIn", "0");
+  localStorage.removeItem("login");
+  localStorage.removeItem("nomeCompleto");
+  renderAuthUI();
+}
+
+async function apiPostJson(payload) {
+  const res = await fetch(state.apiUrl, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+  return await res.json();
+}
+
+async function doLogin(login, senha) {
+  const data = await apiPostJson({ action: "login", login, senha });
+  if (!data.ok) return data;
+
+  // sessão simples local
+  state.loggedIn = true;
+  state.login = data.login || login;
+  state.nomeCompleto = data.nomeCompleto || "";
+
+  localStorage.setItem("loggedIn", "1");
+  localStorage.setItem("login", state.login);
+  localStorage.setItem("nomeCompleto", state.nomeCompleto);
+
+  // troca obrigatória?
+  if (data.trocarSenha) {
+    $("trocaCard").style.display = "block";
+    $("trocaHint").textContent = "Troca obrigatoria: digite a senha atual e uma nova.";
+  } else {
+    $("trocaCard").style.display = "none";
   }
+
+  return data;
+}
+
+async function trocarSenha(login, senhaAtual, novaSenha) {
+  const data = await apiPostJson({ action: "trocar_senha", login, senhaAtual, novaSenha });
+  return data;
 }
 
 // ====== GEO (COM VIRGULA) ======
 function normCoord(v) {
   if (v === null || v === undefined || v === "") return "";
-  // Garante virgula e string
   return String(v).trim().replace(/\./g, ",");
 }
-
 async function getGeo() {
   return new Promise((resolve) => {
     if (!navigator.geolocation) return resolve({ lat: "", lon: "", accuracy: "" });
@@ -118,13 +160,9 @@ async function atualizarBase() {
 }
 
 // ====== STATUS NORMALIZE ======
-function normStatus(s) {
-  return String(s || "").trim().toUpperCase();
-}
+function normStatus(s) { return String(s || "").trim().toUpperCase(); }
 
-// Mapeia strings que vem da base/servidor vs UI
 function uiToBaseStatus(uiStatus) {
-  // UI usa PENDENTE_OBRA e SEM_ACESSO (com underscore)
   if (uiStatus === "PENDENTE_OBRA") return "PENDENTE OBRA";
   if (uiStatus === "SEM_ACESSO") return "SEM ACESSO";
   return uiStatus;
@@ -148,33 +186,30 @@ function updateActionButtonsForTag(tag) {
   const btnSemAcesso = $("btnSemAcesso");
   const btnGeo = $("btnGeo");
 
-  // defaults
   btnConcluido.disabled = false;
   btnObra.disabled = false;
   btnSemAcesso.disabled = false;
-
-  // PENDENTE: só aparece quando status atual != PENDENTE (e cadastrada)
-  const isCadastrada = !!info;
-  const isPendente = (stNorm === "PENDENTE");
-  btnPendente.style.display = (isCadastrada && !isPendente) ? "inline-block" : "none";
   btnPendente.disabled = false;
 
-  // Atualizar geoloc: só aparece quando status atual = CONCLUIDO
+  const isCadastrada = !!info;
+  const isPendente = (stNorm === "PENDENTE");
   const isConcluido = (stNorm === "CONCLUIDO");
+
+  // PENDENTE só aparece quando status atual != PENDENTE (e cadastrada)
+  btnPendente.style.display = (isCadastrada && !isPendente) ? "inline-block" : "none";
+
+  // Atualizar geoloc só aparece quando CONCLUIDO (e cadastrada)
   btnGeo.style.display = (isCadastrada && isConcluido) ? "inline-block" : "none";
 
-  // Desabilitar botão do status atual sempre que status atual != PENDENTE
-  // (e também garante concluido disabled quando já concluido)
+  // se não pendente, desabilita o botão do status atual
   if (isCadastrada && !isPendente) {
     const uiStatus = baseToUiStatus(stNorm);
-
     if (uiStatus === "CONCLUIDO") btnConcluido.disabled = true;
     if (uiStatus === "PENDENTE_OBRA") btnObra.disabled = true;
     if (uiStatus === "SEM_ACESSO") btnSemAcesso.disabled = true;
-    // PENDENTE não é o status atual aqui (pq !isPendente), então fica habilitado
   }
 
-  // Se não cadastrada: não tem status confiável — deixa tudo visível menos GEO e PENDENTE
+  // não cadastrada: não mostra pendente nem geo
   if (!isCadastrada) {
     btnPendente.style.display = "none";
     btnGeo.style.display = "none";
@@ -185,7 +220,7 @@ function showTag(tag) {
   const t = String(tag || "").trim();
   if (!t) return;
 
-  // ✅ HOLD: se já tem tag em atendimento, não aceita outra diferente
+  // HOLD: se já tem tag em atendimento, não aceita outra diferente
   if (state.currentTag && state.currentTag !== t) {
     alert(`TAG em atendimento: ${state.currentTag}\nFinalize uma ação ou clique "LER NOVAMENTE".`);
     return;
@@ -207,7 +242,6 @@ function showTag(tag) {
 
   state.allowActions = true;
   $("acoesBox").style.display = "block";
-
   updateActionButtonsForTag(t);
 }
 
@@ -220,19 +254,14 @@ function clearTag() {
   $("acoesBox").style.display = "none";
 }
 
-// Ler novamente: NÃO destrava (continua hold), só recarrega da base/cache
 function lerNovamente() {
   if (!state.currentTag) return;
-  // força re-render e regrinhas
   showTag(state.currentTag);
 }
 
 // ====== EVENT CREATE ======
 async function criarEvento(novoStatusUI, opts = {}) {
-  if (!state.currentTag) {
-    alert("Nenhuma TAG carregada.");
-    return;
-  }
+  if (!state.currentTag) return alert("Nenhuma TAG carregada.");
 
   const tag = state.currentTag;
   const geo = await getGeo();
@@ -244,15 +273,15 @@ async function criarEvento(novoStatusUI, opts = {}) {
     timestamp_iso: new Date().toISOString(),
     tag,
     status: statusBase,
-    usuario: "campo",   // depois você troca por login
-    lat: geo.lat,       // ✅ com virgula
-    lon: geo.lon,       // ✅ com virgula
+    usuario: state.login || "campo",  // ✅ AGORA VAI O LOGIN
+    lat: geo.lat,
+    lon: geo.lon,
     accuracy: geo.accuracy,
     device_id: state.deviceId,
     obs: opts.obs || ""
   };
 
-  // Atualiza cache local (status) — inclusive pra geo update (status igual)
+  // atualiza cache local
   const info = state.base.get(tag);
   if (info) {
     info.status = statusBase;
@@ -263,9 +292,9 @@ async function criarEvento(novoStatusUI, opts = {}) {
   // fila offline
   state.queue.unshift(ev);
   saveQueue();
-  log(`Evento salvo offline: ${tag} -> ${statusBase} (acc=${geo.accuracy})`);
+  log(`Evento salvo offline: ${tag} -> ${statusBase} (user=${ev.usuario})`);
 
-  // Ao executar uma ação de status / geo update, destrava para próxima tag
+  // libera para próxima tag
   clearTag();
 
   // tenta sync imediato se online
@@ -273,14 +302,13 @@ async function criarEvento(novoStatusUI, opts = {}) {
 }
 
 // ====== REGRAS DE CONFIRMACAO ======
-// ✅: só confirma quando muda de CONCLUIDO -> qualquer outro
 async function enviarComRegraConfirmacao_(novoStatusUI) {
   if (!state.currentTag) return;
 
   const tag = state.currentTag;
   const info = state.base.get(tag);
 
-  // Se não cadastrada, manda direto (sem confirmação)
+  // não cadastrada: manda direto
   if (!info) {
     await criarEvento(novoStatusUI);
     return;
@@ -291,64 +319,55 @@ async function enviarComRegraConfirmacao_(novoStatusUI) {
   const novoBase = uiToBaseStatus(novoStatusUI);
   const novoNorm = normStatus(novoBase).replace(/\s+/g, " ");
 
-  // ✅ Só pede confirmação se ESTÁ CONCLUIDO e quer mudar pra outro
+  // ✅ Só confirma quando sai de CONCLUIDO pra outro
   if (atualNorm === "CONCLUIDO" && novoNorm !== "CONCLUIDO") {
     const ok = confirm(`Confirmar mudanca de status?\nDe: ${atualBase}\nPara: ${novoBase}`);
     if (!ok) return;
   }
 
-  // ✅ PENDENTE -> CONCLUIDO: SEM confirmação (cai aqui direto)
   await criarEvento(novoStatusUI);
 }
 
-// Atualizar geoloc (apenas quando status atual = CONCLUIDO)
+// Atualizar geoloc: apenas para concluido
 async function atualizarGeoloc_() {
   if (!state.currentTag) return;
-  const tag = state.currentTag;
-  const info = state.base.get(tag);
+  const info = state.base.get(state.currentTag);
   if (!info) return;
 
   const atualNorm = normStatus(info.status).replace(/\s+/g, " ");
   if (atualNorm !== "CONCLUIDO") return;
 
-  // grava novo evento com mesmo status (CONCLUIDO) e GPS novo
   await criarEvento("CONCLUIDO", { obs: "ATUALIZAR_GEOLOC" });
 }
 
 // ====== SYNC ======
 async function sync() {
-  if (!navigator.onLine) {
-    log("Sync: sem internet.");
-    return;
-  }
+  if (!navigator.onLine) return log("Sync: sem internet.");
   if (!state.queue.length) {
     log("Sync: fila vazia.");
     setLastSync(new Date().toISOString());
     return;
   }
 
-  // manda em lotes de 50
-  const batch = state.queue.slice(-50); // mais antigos do fim
+  const batch = state.queue.slice(-50);
   const payload = {
     device_id: state.deviceId,
-    usuario: "campo",
+    usuario: state.login || "campo",
     eventos: batch
   };
 
   log(`Sync: enviando lote ${batch.length}...`);
 
-  // no-cors para GitHub Pages
   await fetch(state.apiUrl, {
     method: "POST",
     mode: "no-cors",
     body: JSON.stringify(payload)
   });
 
-  // remove lote enviado
   state.queue = state.queue.slice(0, Math.max(0, state.queue.length - batch.length));
   saveQueue();
   setLastSync(new Date().toISOString());
-  log("Sync: enviado. (Se quiser, clique 'Atualizar base' para conferir status.)");
+  log("Sync: enviado. (Clique 'Atualizar base' se quiser conferir.)");
 }
 
 // ====== SCHEDULER ======
@@ -358,9 +377,7 @@ function startScheduler() {
     const last = state.lastSyncAt ? new Date(state.lastSyncAt).getTime() : 0;
     const now = Date.now();
     const mins = (now - last) / 60000;
-    if (mins >= SYNC_MINUTES_DEFAULT && state.queue.length) {
-      sync().catch(e => log("Erro sync: " + e));
-    }
+    if (mins >= SYNC_MINUTES_DEFAULT && state.queue.length) sync().catch(e => log("Erro sync: " + e));
   }, 60000);
 
   window.addEventListener("online", () => {
@@ -376,12 +393,12 @@ function startScheduler() {
   });
 }
 
-// ====== QR SCAN (BarcodeDetector) ======
+// ====== QR SCAN ======
 async function startCamera() {
   if (state.cam.running) return;
 
   if (!("BarcodeDetector" in window)) {
-    alert("Seu Chrome nao suporta BarcodeDetector. Use o campo manual por enquanto.");
+    alert("Seu Chrome nao suporta BarcodeDetector. Use o campo manual.");
     return;
   }
 
@@ -399,15 +416,12 @@ async function startCamera() {
 
   state.cam.running = true;
   log("Camera iniciada.");
-
   scanLoop();
 }
 
 function stopCamera() {
   state.cam.running = false;
-  if (state.cam.stream) {
-    state.cam.stream.getTracks().forEach(t => t.stop());
-  }
+  if (state.cam.stream) state.cam.stream.getTracks().forEach(t => t.stop());
   state.cam.stream = null;
   $("video").srcObject = null;
   log("Camera parada.");
@@ -422,21 +436,19 @@ async function scanLoop() {
         const val = String(barcodes[0].rawValue || "").trim();
         const now = Date.now();
 
-        // throttling
         if (val && (val !== state.cam.lastValue || (now - state.cam.lastAt) > 2000)) {
           state.cam.lastValue = val;
           state.cam.lastAt = now;
 
-          // ✅ HOLD: se já tem tag em atendimento e for diferente, ignora
           if (state.currentTag && state.currentTag !== val) {
-            log(`QR ignorado (HOLD ativo): lido=${val}, em_atendimento=${state.currentTag}`);
+            log(`QR ignorado (HOLD): lido=${val}, em_atendimento=${state.currentTag}`);
           } else {
             log("QR lido: " + val);
             showTag(val);
           }
         }
       }
-    } catch (e) {}
+    } catch (_) {}
     await new Promise(r => setTimeout(r, 250));
   }
 }
@@ -475,6 +487,57 @@ async function init() {
   loadBaseCache();
   setLastSync(state.lastSyncAt);
 
+  // auth UI
+  renderAuthUI();
+
+  $("btnLogin").onclick = async () => {
+    try {
+      const login = $("loginUser").value.trim().toLowerCase();
+      const senha = $("loginPass").value;
+      if (!login || !senha) return alert("Informe login e senha.");
+
+      const data = await doLogin(login, senha);
+      if (!data.ok) return alert(data.error || "Falha no login.");
+
+      renderAuthUI();
+
+      if (data.trocarSenha) {
+        $("trocaCard").style.display = "block";
+      } else {
+        $("trocaCard").style.display = "none";
+      }
+    } catch (e) {
+      alert("Erro login. Veja o log.");
+      log("Erro login: " + e);
+    }
+  };
+
+  $("btnLogout").onclick = () => logout();
+
+  $("btnTrocarSenha").onclick = async () => {
+    try {
+      const senhaAtual = $("senhaAtual").value;
+      const senhaNova = $("senhaNova").value;
+      if (!senhaAtual || !senhaNova) return alert("Preencha senha atual e nova.");
+
+      const resp = await trocarSenha(state.login, senhaAtual, senhaNova);
+      if (!resp.ok) return alert(resp.error || "Falha ao trocar senha.");
+
+      $("trocaCard").style.display = "none";
+      $("senhaAtual").value = "";
+      $("senhaNova").value = "";
+      alert("Senha trocada. Pode continuar.");
+    } catch (e) {
+      alert("Erro ao trocar senha.");
+      log("Erro troca senha: " + e);
+    }
+  };
+
+  $("btnCancelarTroca").onclick = () => {
+    $("trocaCard").style.display = "none";
+  };
+
+  // app buttons
   $("btnSalvarApi").onclick = () => {
     state.apiUrl = $("apiUrl").value.trim() || DEFAULT_API_URL;
     localStorage.setItem("apiUrl", state.apiUrl);
@@ -498,16 +561,12 @@ async function init() {
   };
 
   $("btnLerNovamente").onclick = () => lerNovamente();
-
-  // Atualizar geoloc (somente para concluido)
   $("btnGeo").onclick = () => atualizarGeoloc_().catch(e => log("Erro geo: " + e));
 
-  // Clique nos status (com regra de confirmacao CONCLUIDO->outro)
   document.querySelectorAll("button[data-status]").forEach(btn => {
     btn.addEventListener("click", async () => {
       if (!state.allowActions) return;
-      const statusUI = btn.getAttribute("data-status");
-      await enviarComRegraConfirmacao_(statusUI);
+      await enviarComRegraConfirmacao_(btn.getAttribute("data-status"));
     });
   });
 
