@@ -4,10 +4,8 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Validador de TAGs</title>
-
   <link rel="manifest" href="manifest.json">
   <meta name="theme-color" content="#111111">
-
   <style>
     body { font-family: Arial, sans-serif; margin: 14px; }
     .row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
@@ -19,58 +17,27 @@
     .btns { display:flex; gap:10px; flex-wrap:wrap; }
     #video { width: 100%; max-height: 340px; background:#000; border-radius: 10px; }
     .muted { color:#666; }
-    .warn { color:#b45309; font-weight: 700; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; white-space: pre-wrap; }
     .ok { color:#15803d; font-weight: 700; }
     .danger { color:#b91c1c; font-weight: 700; }
-    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; white-space: pre-wrap; }
-
-    /* ====== CORES BOTOES ====== */
-    .btn { border:0; border-radius: 12px; font-weight: 800; }
-    .btn:disabled { opacity:.45; cursor:not-allowed; }
-    .btn-concluido { background:#16a34a; color:#fff; }
-    .btn-pendente  { background:#facc15; color:#111; }
-    .btn-obra      { background:#f97316; color:#fff; }
-    .btn-semacesso { background:#dc2626; color:#fff; }
-    .btn-geo       { background:#2563eb; color:#fff; }
-    .btn-sec       { background:#6b7280; color:#fff; }
   </style>
 </head>
 
 <body>
   <h2>Validador de TAGs (Campo)</h2>
 
-  <!-- LOGIN -->
-  <div class="card" id="loginCard">
-    <h3>Login</h3>
-    <p class="muted">Use seu login (nome.ultimosobrenome) e senha.</p>
-    <div class="row">
-      <input id="loginUser" placeholder="login" autocomplete="username" />
-      <input id="loginPass" placeholder="senha" type="password" autocomplete="current-password" />
-    </div>
+  <div class="card">
+    <h3>Codigo de verificacao</h3>
+    <p class="muted">Digite o codigo fixo de 6 digitos para liberar o uso.</p>
+    <input id="code6" inputmode="numeric" maxlength="6" placeholder="000000" />
     <div class="row" style="margin-top:10px;">
-      <button id="btnLogin" class="big">Entrar</button>
-      <button id="btnLogout" class="big" style="display:none;">Sair</button>
+      <button id="btnVerificar" class="big">Verificar</button>
+      <button id="btnSair" class="big" style="display:none;">Sair</button>
     </div>
-    <p class="muted">Logado como: <b><span id="whoami">-</span></b></p>
-    <p class="muted" id="loginHint"></p>
+    <p class="muted">Status: <b><span id="authState">NAO VERIFICADO</span></b></p>
   </div>
 
-  <!-- TROCAR SENHA (aparece quando backend pede) -->
-  <div class="card" id="trocaCard" style="display:none;">
-    <h3>Troca obrigatoria de senha</h3>
-    <p class="muted">Defina uma nova senha para continuar.</p>
-    <input id="senhaAtual" placeholder="senha atual" type="password" />
-    <input id="senhaNova" placeholder="nova senha" type="password" style="margin-top:8px;" />
-    <div class="row" style="margin-top:10px;">
-      <button id="btnTrocarSenha" class="big">Trocar senha</button>
-      <button id="btnCancelarTroca" class="big">Cancelar</button>
-    </div>
-    <p class="muted" id="trocaHint"></p>
-  </div>
-
-  <!-- APP -->
   <div id="appArea" style="display:none;">
-
     <div class="card">
       <div class="row">
         <button id="btnInstall" class="big" style="display:none">Instalar no celular</button>
@@ -79,19 +46,18 @@
       </div>
       <p class="muted">Fila offline: <b><span id="filaCount">0</span></b> evento(s) pendente(s)</p>
       <p class="muted">Rede: <b><span id="net">-</span></b></p>
-      <p class="muted">Último sync: <b><span id="lastSync">-</span></b></p>
+      <p class="muted">Ultimo sync: <b><span id="lastSync">-</span></b></p>
     </div>
 
     <div class="card">
       <h3>Scanner QR</h3>
       <video id="video" playsinline></video>
-
       <div class="row" style="margin-top:10px;">
         <button id="btnStartCam" class="big">Iniciar camera</button>
         <button id="btnStopCam" class="big">Parar camera</button>
       </div>
 
-      <p style="margin-top:10px;"><b>TAG em atendimento</b></p>
+      <p style="margin-top:10px;"><b>TAG lida</b></p>
       <input id="tagLida" placeholder="Aguardando leitura..." readonly />
 
       <p class="muted">
@@ -103,20 +69,14 @@
       <div id="acoesBox" style="display:none;">
         <p><b>Selecione o resultado:</b></p>
         <div class="btns">
-          <button id="btnConcluido" data-status="CONCLUIDO" class="big btn btn-concluido">CONCLUIDO</button>
-
-          <!-- PENDENTE: só aparece quando status atual != PENDENTE -->
-          <button id="btnPendente" data-status="PENDENTE" class="big btn btn-pendente" style="display:none;">PENDENTE</button>
-
-          <button id="btnObra" data-status="PENDENTE_OBRA" class="big btn btn-obra">PENDENTE OBRA</button>
-          <button id="btnSemAcesso" data-status="SEM_ACESSO" class="big btn btn-semacesso">SEM ACESSO</button>
-
-          <!-- Atualizar geoloc: só aparece quando status atual = CONCLUIDO -->
-          <button id="btnGeo" class="big btn btn-geo" style="display:none;">ATUALIZAR GEOLOC</button>
-
-          <button id="btnLerNovamente" class="big btn btn-sec">LER NOVAMENTE</button>
+          <button id="btnConcluido" data-status="CONCLUIDO" class="big">CONCLUIDO</button>
+          <button id="btnObra" data-status="PENDENTE_OBRA" class="big">PENDENTE OBRA</button>
+          <button id="btnSemAcesso" data-status="SEM_ACESSO" class="big">SEM ACESSO</button>
+          <button id="btnPendente" data-status="PENDENTE" class="big" style="display:none;">PENDENTE</button>
+          <button id="btnGeo" class="big" style="display:none;">ATUALIZAR GEOLOC</button>
+          <button id="btnLerNovamente" class="big">Ler novamente</button>
         </div>
-        <p class="muted">GPS é capturado no clique do botão.</p>
+        <p class="muted">GPS e capturado no clique do botao.</p>
       </div>
 
       <div class="card">
@@ -138,7 +98,6 @@
       <h3>Log</h3>
       <div id="log" class="mono"></div>
     </div>
-
   </div>
 
   <script src="app.js"></script>
