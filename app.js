@@ -64,15 +64,21 @@ function loadBaseCache() {
   }
 }
 
-// ====== GEO ======
+// ====== GEO (sempre com ponto) ======
+function normCoord(v) {
+  if (v === null || v === undefined || v === "") return "";
+  // Garante ponto e string
+  return String(v).trim().replace(",", ".");
+}
+
 async function getGeo() {
   return new Promise((resolve) => {
     if (!navigator.geolocation) return resolve({ lat: "", lon: "", accuracy: "" });
     navigator.geolocation.getCurrentPosition(
       (pos) => resolve({
-        lat: pos.coords.latitude,
-        lon: pos.coords.longitude,
-        accuracy: pos.coords.accuracy
+        lat: normCoord(pos.coords.latitude),
+        lon: normCoord(pos.coords.longitude),
+        accuracy: normCoord(pos.coords.accuracy)
       }),
       () => resolve({ lat: "", lon: "", accuracy: "" }),
       { enableHighAccuracy: true, timeout: 8000, maximumAge: 0 }
@@ -106,14 +112,13 @@ async function atualizarBase() {
 function showTag(tag) {
   state.currentTag = tag;
   $("tagLida").value = tag || "";
+
   const info = state.base.get(tag);
   if (!info) {
     $("statusAtual").textContent = "NAO CADASTRADA";
     $("setorAtual").textContent = "-";
     $("classeAtual").textContent = "-";
-    // não cadastrada: permite tratar mesmo assim (você decide depois)
     state.allowActions = true;
-    $("revalBox").style.display = "none";
     $("acoesBox").style.display = "block";
     return;
   }
@@ -122,16 +127,9 @@ function showTag(tag) {
   $("setorAtual").textContent = info.setor || "-";
   $("classeAtual").textContent = info.classe || "-";
 
-  if ((info.status || "PENDENTE") !== "PENDENTE") {
-    // pede confirmação de revalidar
-    state.allowActions = false;
-    $("acoesBox").style.display = "none";
-    $("revalBox").style.display = "block";
-  } else {
-    state.allowActions = true;
-    $("revalBox").style.display = "none";
-    $("acoesBox").style.display = "block";
-  }
+  // Agora SEM bloqueio. A confirmação acontece no clique do status.
+  state.allowActions = true;
+  $("acoesBox").style.display = "block";
 }
 
 function clearTag() {
@@ -140,7 +138,6 @@ function clearTag() {
   $("statusAtual").textContent = "-";
   $("setorAtual").textContent = "-";
   $("classeAtual").textContent = "-";
-  $("revalBox").style.display = "none";
   $("acoesBox").style.display = "none";
 }
 
@@ -152,20 +149,21 @@ async function criarEvento(status) {
   }
   const tag = state.currentTag;
   const geo = await getGeo();
+
   const ev = {
     event_id: crypto.randomUUID(),
     timestamp_iso: new Date().toISOString(),
     tag,
     status,
     usuario: "campo",   // depois a gente troca por login/pin
-    lat: geo.lat,
-    lon: geo.lon,
+    lat: geo.lat,       // string com ponto
+    lon: geo.lon,       // string com ponto
     accuracy: geo.accuracy,
     device_id: state.deviceId,
     obs: ""
   };
 
-  // atualiza status local (pra refletir na tela e bloquear se quiser)
+  // Atualiza status local (cache) para refletir na tela e usar na próxima confirmação
   const info = state.base.get(tag);
   if (info) {
     info.status = status;
@@ -177,7 +175,48 @@ async function criarEvento(status) {
   state.queue.unshift(ev);
   saveQueue();
   log(`Evento salvo offline: ${tag} -> ${status} (GPS acc=${geo.accuracy})`);
+
   clearTag();
+}
+
+// ====== CONFIRMACOES (como voce pediu) ======
+function getStatusAtualDaTag_(tag) {
+  const info = state.base.get(tag);
+  if (!info) return null; // nao cadastrada
+  return String(info.status || "PENDENTE").trim();
+}
+
+async function confirmarEEnviar_(novoStatus) {
+  if (!state.currentTag) return;
+
+  const tag = state.currentTag;
+  const statusAtual = getStatusAtualDaTag_(tag);
+
+  // TAG nao cadastrada: nao tem "status anterior" confiavel
+  if (statusAtual === null) {
+    await criarEvento(novoStatus);
+    if (navigator.onLine) sync().catch(e => log("Erro sync: " + e));
+    return;
+  }
+
+  const atual = String(statusAtual).toUpperCase();
+  const novo = String(novoStatus).toUpperCase();
+
+  // 1) MESMO STATUS: perguntar se quer atualizar geolocalizacao
+  if (novo === atual) {
+    const ok = confirm("TAG ja validada, atualizar geolocalizacao?");
+    if (!ok) return;
+    await criarEvento(novoStatus); // grava de novo com mesmo status (GPS novo)
+    if (navigator.onLine) sync().catch(e => log("Erro sync: " + e));
+    return;
+  }
+
+  // 2) STATUS DIFERENTE: confirmar mudanca de status
+  const ok = confirm(`Confirmar mudanca de status?\nDe: ${statusAtual}\nPara: ${novoStatus}`);
+  if (!ok) return;
+
+  await criarEvento(novoStatus);
+  if (navigator.onLine) sync().catch(e => log("Erro sync: " + e));
 }
 
 // ====== SYNC ======
@@ -202,8 +241,7 @@ async function sync() {
 
   log(`Sync: enviando lote ${batch.length}...`);
 
-  // Para evitar CORS/preflight, usamos no-cors e sem headers.
-  // Como no-cors não deixa ler resposta, assumimos "enviado" e depois você confere pela base.
+  // Mantemos no-cors (como estava), para funcionar no GitHub Pages sem dor de cabeca
   await fetch(state.apiUrl, {
     method: "POST",
     mode: "no-cors",
@@ -211,7 +249,6 @@ async function sync() {
   });
 
   // Remove o lote enviado (assumindo sucesso). Dedup no servidor por event_id evita duplicar.
-  // Removemos exatamente os que mandamos (os mais antigos).
   state.queue = state.queue.slice(0, Math.max(0, state.queue.length - batch.length));
   saveQueue();
   setLastSync(new Date().toISOString());
@@ -220,7 +257,6 @@ async function sync() {
 
 // ====== SCHEDULER ======
 function startScheduler() {
-  // tenta a cada 60s e checa se passou 1h desde o último sync
   setInterval(() => {
     if (!navigator.onLine) return;
     const last = state.lastSyncAt ? new Date(state.lastSyncAt).getTime() : 0;
@@ -231,14 +267,12 @@ function startScheduler() {
     }
   }, 60000);
 
-  // voltou a internet
   window.addEventListener("online", () => {
     setNet();
     if (state.queue.length) sync().catch(e => log("Erro sync: " + e));
   });
   window.addEventListener("offline", setNet);
 
-  // voltou pro app
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "visible" && navigator.onLine && state.queue.length) {
       sync().catch(e => log("Erro sync: " + e));
@@ -250,7 +284,6 @@ function startScheduler() {
 async function startCamera() {
   if (state.cam.running) return;
 
-  // BarcodeDetector é nativo no Chrome Android (na maioria dos aparelhos)
   if (!("BarcodeDetector" in window)) {
     alert("Seu Chrome nao suporta BarcodeDetector. Use o campo manual por enquanto.");
     return;
@@ -292,7 +325,6 @@ async function scanLoop() {
       if (barcodes && barcodes.length) {
         const val = String(barcodes[0].rawValue || "").trim();
         const now = Date.now();
-        // debounce: evita ler o mesmo QR repetido
         if (val && (val !== state.cam.lastValue || (now - state.cam.lastAt) > 2000)) {
           state.cam.lastValue = val;
           state.cam.lastAt = now;
@@ -300,9 +332,7 @@ async function scanLoop() {
           showTag(val);
         }
       }
-    } catch (e) {
-      // ignora e continua
-    }
+    } catch (e) {}
     await new Promise(r => setTimeout(r, 250));
   }
 }
@@ -324,7 +354,6 @@ $("btnInstall")?.addEventListener("click", async () => {
 
 // ====== INIT ======
 async function init() {
-  // service worker
   if ("serviceWorker" in navigator) {
     try {
       await navigator.serviceWorker.register("sw.js");
@@ -363,25 +392,14 @@ async function init() {
     if (t) showTag(t);
   };
 
-  $("btnRevalNao").onclick = () => {
-    $("revalBox").style.display = "none";
-    clearTag();
-  };
-  $("btnRevalSim").onclick = () => {
-    $("revalBox").style.display = "none";
-    state.allowActions = true;
-    $("acoesBox").style.display = "block";
-  };
-
   $("btnLerNovamente").onclick = () => clearTag();
 
+  // Clique nos status: agora faz confirmacao conforme regra
   document.querySelectorAll("button[data-status]").forEach(btn => {
     btn.addEventListener("click", async () => {
       if (!state.allowActions) return;
       const status = btn.getAttribute("data-status");
-      await criarEvento(status);
-      // tenta sync imediato se tiver internet (bem útil no campo)
-      if (navigator.onLine) sync().catch(e => log("Erro sync: " + e));
+      await confirmarEEnviar_(status);
     });
   });
 
