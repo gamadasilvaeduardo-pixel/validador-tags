@@ -24,25 +24,17 @@
     .ok { color:#22c55e; font-weight: 700; }
     .danger { color:#ef4444; font-weight: 700; }
     .small { font-size: 13px; }
-    .two { display:grid; grid-template-columns: 1fr 120px; gap:10px; }
-    @media (max-width: 520px){
-      .two { grid-template-columns: 1fr; }
-    }
   </style>
 </head>
 
 <body>
   <h2>Validador de TAGs (Campo)</h2>
 
-  <!-- LOGIN -->
   <div class="card">
     <h3>Login</h3>
-    <p class="muted">Use login (nome.ultimosobrenome) + codigo de 4 digitos.</p>
+    <p class="muted">Somente login (nome.sobrenome). O servidor valida pela aba USUARIOS.</p>
 
-    <div class="two">
-      <input id="login" placeholder="nome.sobrenome" autocomplete="username" />
-      <input id="codigo4" inputmode="numeric" maxlength="4" placeholder="0000" autocomplete="one-time-code" />
-    </div>
+    <input id="login" placeholder="nome.sobrenome" autocomplete="username" />
 
     <div class="row" style="margin-top:10px;">
       <button id="btnEntrar" class="big">Entrar</button>
@@ -51,10 +43,8 @@
 
     <p class="muted">Status: <b><span id="authState">NAO LOGADO</span></b></p>
     <p class="muted">Usuario: <b><span id="who">-</span></b></p>
-    <p class="muted small">O codigo4 e criado na planilha (aba USUARIOS).</p>
   </div>
 
-  <!-- APP AREA -->
   <div id="appArea" style="display:none;">
 
     <div class="card">
