@@ -1,105 +1,467 @@
-<!doctype html>
-<html lang="pt-br">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Validador de TAGs</title>
-  <link rel="manifest" href="manifest.json">
-  <meta name="theme-color" content="#111111">
-  <style>
-    body { font-family: Arial, sans-serif; margin: 14px; }
-    .row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
-    .card { border: 1px solid #ddd; border-radius: 10px; padding: 12px; margin: 10px 0; }
-    input, button { font-size: 16px; padding: 10px; }
-    input { width: 100%; box-sizing: border-box; }
-    button { cursor:pointer; }
-    .big { font-size: 18px; padding: 14px; }
-    .btns { display:flex; gap:10px; flex-wrap:wrap; }
-    #video { width: 100%; max-height: 340px; background:#000; border-radius: 10px; }
-    .muted { color:#666; }
-    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; white-space: pre-wrap; }
-    .ok { color:#15803d; font-weight: 700; }
-    .danger { color:#b91c1c; font-weight: 700; }
-  </style>
-</head>
+/**
+ * CODE.GS — Backend Google Apps Script (Planilha)
+ *
+ * AUTH:
+ * - action:"login"  { login, codigo4 }
+ *
+ * USER ADMIN:
+ * - action:"user_create" { nome, sobrenome }  -> cria login e codigo4 aleatorio e salva em USUARIOS
+ * - action:"user_reset"  { login }            -> gera novo CODIGO4 aleatorio e atualiza em USUARIOS
+ *
+ * EVENT:
+ * - action:"event" { tag, status, lat, lon, accuracy, device_id, obs, confirm, login, codigo4 }
+ *
+ * GET:
+ * - ?action=base
+ *
+ * Confirmacao server-side (action:event):
+ * - So pede confirm quando sair de CONCLUIDO -> outro
+ *
+ * GPS salvo como TEXTO e com VIRGULA
+ * EM: dd/MM/yyyy 'as' HH:mm:ss
+ */
 
-<body>
-  <h2>Validador de TAGs (Campo)</h2>
+const SHEET_TAGS     = "TAGS";
+const SHEET_EVENTOS  = "EVENTOS";
+const SHEET_USUARIOS = "USUARIOS";
+const SHEET_CONFIG   = "CONFIG";
 
-  <div class="card">
-    <h3>Codigo de verificacao</h3>
-    <p class="muted">Digite o codigo fixo de 6 digitos para liberar o uso.</p>
-    <input id="code6" inputmode="numeric" maxlength="6" placeholder="000000" />
-    <div class="row" style="margin-top:10px;">
-      <button id="btnVerificar" class="big">Verificar</button>
-      <button id="btnSair" class="big" style="display:none;">Sair</button>
-    </div>
-    <p class="muted">Status: <b><span id="authState">NAO VERIFICADO</span></b></p>
-  </div>
+// ===== TAGS COLS =====
+const TAGS_COL_SETOR          = 1;
+const TAGS_COL_TAG            = 2;
+const TAGS_COL_DESCRICAO      = 3;
+const TAGS_COL_CLASSE         = 4;
+const TAGS_COL_STATUS         = 5;
+const TAGS_COL_ATIVO          = 6;
+const TAGS_COL_ATUALIZADO_POR = 7;
+const TAGS_COL_EM             = 8;
+const TAGS_COL_LAT            = 9;
+const TAGS_COL_LON            = 10;
+const TAGS_COL_PRECISAO       = 11;
 
-  <div id="appArea" style="display:none;">
-    <div class="card">
-      <div class="row">
-        <button id="btnInstall" class="big" style="display:none">Instalar no celular</button>
-        <button id="btnAtualizarBase" class="big">Atualizar base</button>
-        <button id="btnSync" class="big">Sincronizar</button>
-      </div>
-      <p class="muted">Fila offline: <b><span id="filaCount">0</span></b> evento(s) pendente(s)</p>
-      <p class="muted">Rede: <b><span id="net">-</span></b></p>
-      <p class="muted">Ultimo sync: <b><span id="lastSync">-</span></b></p>
-    </div>
+// ===== USUARIOS COLS (layout simples) =====
+// Cabecalho sugerido na linha 4 e dados a partir da linha 5:
+// A USER_ID | B NOME | C SOBRENOME | D LOGIN | E CODIGO4 | F ATIVO
+const USR_COL_USER_ID  = 1; // A
+const USR_COL_NOME     = 2; // B
+const USR_COL_SOBREN   = 3; // C
+const USR_COL_LOGIN    = 4; // D
+const USR_COL_CODIGO4  = 5; // E
+const USR_COL_ATIVO    = 6; // F
 
-    <div class="card">
-      <h3>Scanner QR</h3>
-      <video id="video" playsinline></video>
-      <div class="row" style="margin-top:10px;">
-        <button id="btnStartCam" class="big">Iniciar camera</button>
-        <button id="btnStopCam" class="big">Parar camera</button>
-      </div>
+// ================= HELPERS =================
+function getSheet_(name) {
+  const sh = SpreadsheetApp.getActive().getSheetByName(name);
+  if (!sh) throw new Error(`Aba "${name}" nao existe.`);
+  return sh;
+}
+function jsonResponse(obj) {
+  return ContentService.createTextOutput(JSON.stringify(obj))
+    .setMimeType(ContentService.MimeType.JSON);
+}
+function nowISO_() { return new Date().toISOString(); }
+function formatarBR_() {
+  return Utilities.formatDate(new Date(), "America/Sao_Paulo", "dd/MM/yyyy 'as' HH:mm:ss");
+}
+function gpsText_(v) {
+  if (v === null || v === undefined) return "";
+  return String(v).trim().replace(/\./g, ",");
+}
+function acharLinhaPorValor_(ws, colIndex, valor, startRow) {
+  const sr = startRow || 2;
+  const lastRow = ws.getLastRow();
+  if (lastRow < sr) return 0;
+  const n = lastRow - sr + 1;
+  const vals = ws.getRange(sr, colIndex, n, 1).getValues().flat();
+  const alvo = String(valor).trim().toLowerCase();
+  for (let i = 0; i < vals.length; i++) {
+    if (String(vals[i]).trim().toLowerCase() === alvo) return i + sr;
+  }
+  return 0;
+}
 
-      <p style="margin-top:10px;"><b>TAG lida</b></p>
-      <input id="tagLida" placeholder="Aguardando leitura..." readonly />
+// ================= NORMALIZACAO (login) =================
+function stripAccents_(s) {
+  return String(s || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
+}
+function onlyLettersDigitsDot_(s) {
+  return String(s || "").toLowerCase().replace(/[^a-z0-9.]+/g, "");
+}
+function gerarLogin_(nome, ultimoSobrenome) {
+  const n = onlyLettersDigitsDot_(stripAccents_(nome)).replace(/\.+/g, ".").replace(/^\.+|\.+$/g,"");
+  const s = onlyLettersDigitsDot_(stripAccents_(ultimoSobrenome)).replace(/\.+/g, ".").replace(/^\.+|\.+$/g,"");
+  if (!n || !s) return "";
+  return `${n}.${s}`;
+}
 
-      <p class="muted">
-        Status atual: <b><span id="statusAtual">-</span></b> |
-        Setor: <b><span id="setorAtual">-</span></b> |
-        Classe: <b><span id="classeAtual">-</span></b>
-      </p>
+// ================= CODIGO4 (aleatorio) =================
+function codigo4Fraco_(c) {
+  const bad = new Set([
+    "0000","1111","2222","3333","4444","5555","6666","7777","8888","9999",
+    "1234","4321","0123","9876"
+  ]);
+  return bad.has(String(c || ""));
+}
 
-      <div id="acoesBox" style="display:none;">
-        <p><b>Selecione o resultado:</b></p>
-        <div class="btns">
-          <button id="btnConcluido" data-status="CONCLUIDO" class="big">CONCLUIDO</button>
-          <button id="btnObra" data-status="PENDENTE_OBRA" class="big">PENDENTE OBRA</button>
-          <button id="btnSemAcesso" data-status="SEM_ACESSO" class="big">SEM ACESSO</button>
-          <button id="btnPendente" data-status="PENDENTE" class="big" style="display:none;">PENDENTE</button>
-          <button id="btnGeo" class="big" style="display:none;">ATUALIZAR GEOLOC</button>
-          <button id="btnLerNovamente" class="big">Ler novamente</button>
-        </div>
-        <p class="muted">GPS e capturado no clique do botao.</p>
-      </div>
+function gerarCodigo4Aleatorio_() {
+  // tenta evitar codigos fracos
+  for (let i = 0; i < 30; i++) {
+    const n = Math.floor(Math.random() * 10000);
+    const c = String(n).padStart(4, "0");
+    if (!codigo4Fraco_(c)) return c;
+  }
+  // fallback
+  return String(Math.floor(Math.random() * 9000) + 1000);
+}
 
-      <div class="card">
-        <p><b>Se precisar (fallback):</b></p>
-        <input id="tagManual" placeholder="Digite/cole a TAG e clique Carregar" />
-        <button id="btnCarregarManual" class="big">Carregar TAG</button>
-      </div>
-    </div>
+// ================= USUARIOS (CRUD basico) =================
+function garantirAbaUsuarios_() {
+  return getSheet_(SHEET_USUARIOS);
+}
 
-    <div class="card">
-      <h3>Config (opcional)</h3>
-      <p class="muted">API URL (Apps Script):</p>
-      <input id="apiUrl" />
-      <button id="btnSalvarApi" class="big">Salvar API</button>
-      <p class="muted">Device ID: <b><span id="deviceId">-</span></b></p>
-    </div>
+function userGetByLogin_(login) {
+  const ws = garantirAbaUsuarios_();
+  const linha = acharLinhaPorValor_(ws, USR_COL_LOGIN, login, 5); // dados a partir da linha 5
+  if (!linha) return null;
 
-    <div class="card">
-      <h3>Log</h3>
-      <div id="log" class="mono"></div>
-    </div>
-  </div>
+  const ativo = String(ws.getRange(linha, USR_COL_ATIVO).getValue() || "").trim().toUpperCase();
+  return {
+    row: linha,
+    user_id: String(ws.getRange(linha, USR_COL_USER_ID).getValue() || ""),
+    nome: String(ws.getRange(linha, USR_COL_NOME).getValue() || ""),
+    sobrenome: String(ws.getRange(linha, USR_COL_SOBREN).getValue() || ""),
+    login: String(ws.getRange(linha, USR_COL_LOGIN).getValue() || ""),
+    codigo4: String(ws.getRange(linha, USR_COL_CODIGO4).getValue() || ""),
+    ativo
+  };
+}
 
-  <script src="app.js"></script>
-</body>
-</html>
+function nextUserId_(ws) {
+  const lastRow = ws.getLastRow();
+  if (lastRow < 5) return 1;
+  const vals = ws.getRange(5, USR_COL_USER_ID, lastRow - 4, 1).getValues().flat();
+  let max = 0;
+  for (const v of vals) {
+    const n = Number(v);
+    if (Number.isFinite(n) && n > max) max = n;
+  }
+  return max + 1;
+}
+
+function codigo4UnicoNaPlanilha_(ws, codigo4) {
+  const lastRow = ws.getLastRow();
+  if (lastRow < 5) return true;
+  const vals = ws.getRange(5, USR_COL_CODIGO4, lastRow - 4, 1).getValues().flat().map(v => String(v||"").trim());
+  return !vals.includes(String(codigo4));
+}
+
+function gerarCodigo4AleatorioUnico_(ws) {
+  for (let i = 0; i < 60; i++) {
+    const c = gerarCodigo4Aleatorio_();
+    if (codigo4UnicoNaPlanilha_(ws, c)) return c;
+  }
+  // se lotar (improvavel), aceita repetido
+  return gerarCodigo4Aleatorio_();
+}
+
+function actionUserCreate_(p) {
+  const nome = String(p.nome || "").trim();
+  const sobrenomeCompleto = String(p.sobrenome || "").trim();
+  if (!nome || !sobrenomeCompleto) return { ok:false, error:"Informe nome e sobrenome." };
+
+  const ultimoSobrenome = sobrenomeCompleto.split(/\s+/).slice(-1)[0];
+  const login = gerarLogin_(nome, ultimoSobrenome);
+  if (!login) return { ok:false, error:"Nao foi possivel gerar login." };
+
+  const ws = garantirAbaUsuarios_();
+  const existente = userGetByLogin_(login);
+  if (existente) return { ok:false, error:`Login ja existe: ${login}` };
+
+  const codigo4 = gerarCodigo4AleatorioUnico_(ws);
+  const id = nextUserId_(ws);
+
+  const r = Math.max(ws.getLastRow() + 1, 5);
+  ws.getRange(r, 1, 1, 6).setValues([[
+    id,
+    nome,
+    sobrenomeCompleto,
+    login,
+    codigo4,
+    "SIM"
+  ]]);
+
+  return { ok:true, login, codigo4, user_id: id };
+}
+
+function actionUserReset_(p) {
+  const login = String(p.login || "").trim().toLowerCase();
+  if (!login) return { ok:false, error:"Informe login." };
+
+  const u = userGetByLogin_(login);
+  if (!u) return { ok:false, error:"Usuario nao encontrado." };
+
+  const ws = garantirAbaUsuarios_();
+
+  // garante que nao repete o atual
+  let novo = "";
+  for (let i = 0; i < 60; i++) {
+    const c = gerarCodigo4AleatorioUnico_(ws);
+    if (String(c) !== String(u.codigo4 || "").trim()) { novo = c; break; }
+  }
+  if (!novo) novo = gerarCodigo4Aleatorio_();
+
+  ws.getRange(u.row, USR_COL_CODIGO4).setValue(novo);
+  return { ok:true, login, codigo4: novo };
+}
+
+function actionLogin_(p) {
+  const login = String(p.login || "").trim().toLowerCase();
+  const codigo4 = String(p.codigo4 || "").trim();
+  if (!login) return { ok:false, error:"Login vazio." };
+  if (!/^\d{4}$/.test(codigo4)) return { ok:false, error:"Codigo4 invalido. Use 4 digitos." };
+
+  const u = userGetByLogin_(login);
+  if (!u) return { ok:false, error:"Usuario nao cadastrado." };
+  if (u.ativo !== "SIM") return { ok:false, error:"Usuario inativo." };
+
+  const expected = String(u.codigo4 || "").trim();
+  if (codigo4 !== expected) return { ok:false, error:"Codigo incorreto." };
+
+  return { ok:true, login: u.login, nome: u.nome, sobrenome: u.sobrenome };
+}
+
+// ================= doGet =================
+function doGet(e) {
+  const action = String(e?.parameter?.action || "").trim();
+  if (action === "base") return jsonResponse(getBase_());
+  return jsonResponse({ ok:false, error:"Invalid action" });
+}
+
+// ================= doPost =================
+function doPost(e) {
+  const lock = LockService.getScriptLock();
+  lock.tryLock(20000);
+
+  try {
+    const body = e?.postData?.contents || "";
+    const payload = JSON.parse(body || "{}");
+
+    // LEGADO (mantem compatvel, sem exigir login/codigo4)
+    if (Array.isArray(payload.eventos)) {
+      return jsonResponse(processarLoteLegado_(payload));
+    }
+
+    const action = String(payload.action || "").trim();
+
+    if (action === "login") {
+      return jsonResponse(actionLogin_(payload));
+    }
+
+    if (action === "user_create") {
+      return jsonResponse(actionUserCreate_(payload));
+    }
+
+    if (action === "user_reset") {
+      return jsonResponse(actionUserReset_(payload));
+    }
+
+    if (action === "event") {
+      // exige login/codigo4 no modo novo
+      const auth = actionLogin_({ login: payload.login, codigo4: payload.codigo4 });
+      if (!auth.ok) return jsonResponse(auth);
+      payload._login_ok = auth.login;
+      return jsonResponse(registrarEventoNovo_(payload));
+    }
+
+    return jsonResponse({ ok:false, error:"Invalid action" });
+  } catch (err) {
+    return jsonResponse({ ok:false, error:String(err && err.message ? err.message : err) });
+  } finally {
+    try { lock.releaseLock(); } catch (_) {}
+  }
+}
+
+// ================= BASE TAGS =================
+function getBase_() {
+  const ws = getSheet_(SHEET_TAGS);
+  const lastRow = ws.getLastRow();
+  const tags = [];
+
+  if (lastRow >= 2) {
+    const rows = ws.getRange(2, 1, lastRow - 1, 11).getValues();
+    for (const r of rows) {
+      const tag = String(r[TAGS_COL_TAG - 1] || "").trim();
+      if (!tag) continue;
+
+      const ativo = String(r[TAGS_COL_ATIVO - 1] || "").trim().toUpperCase();
+      if (ativo !== "SIM") continue;
+
+      tags.push({
+        setor: String(r[TAGS_COL_SETOR - 1] || ""),
+        tag,
+        descricao: String(r[TAGS_COL_DESCRICAO - 1] || ""),
+        classe: String(r[TAGS_COL_CLASSE - 1] || ""),
+        status: String(r[TAGS_COL_STATUS - 1] || "PENDENTE"),
+        ativo
+      });
+    }
+  }
+
+  return { ok:true, tags };
+}
+
+// ================= EVENTOS =================
+function appendEventoNaAba_(ev) {
+  const wsEv = getSheet_(SHEET_EVENTOS);
+  const r = wsEv.getLastRow() + 1;
+
+  // força texto em F,G,H
+  wsEv.getRange(r, 6, 1, 3).setNumberFormat("@");
+
+  wsEv.getRange(r, 1, 1, 10).setValues([[
+    ev.event_id || "",
+    ev.timestamp_iso || "",
+    ev.tag || "",
+    ev.status || "",
+    ev.usuario || "",
+    gpsText_(ev.lat),
+    gpsText_(ev.lon),
+    gpsText_(ev.accuracy),
+    ev.device_id || "",
+    ev.obs || ""
+  ]]);
+}
+
+function atualizarTags_(tag, novoStatus, usuario, lat, lon, accuracy) {
+  const wsTags = getSheet_(SHEET_TAGS);
+  const linha = acharLinhaPorValor_(wsTags, TAGS_COL_TAG, tag, 2);
+  if (!linha) return { ok:false, error:"TAG nao encontrada em TAGS." };
+
+  const ativo = String(wsTags.getRange(linha, TAGS_COL_ATIVO).getValue() || "").trim().toUpperCase();
+  if (ativo !== "SIM") return { ok:false, error:"TAG inativa (ATIVO <> SIM)." };
+
+  wsTags.getRange(linha, TAGS_COL_STATUS).setValue(novoStatus);
+  wsTags.getRange(linha, TAGS_COL_ATUALIZADO_POR).setValue(usuario || "");
+  wsTags.getRange(linha, TAGS_COL_EM).setValue(formatarBR_());
+
+  wsTags.getRange(linha, TAGS_COL_LAT, 1, 3).setNumberFormat("@");
+  wsTags.getRange(linha, TAGS_COL_LAT).setValue(gpsText_(lat));
+  wsTags.getRange(linha, TAGS_COL_LON).setValue(gpsText_(lon));
+  wsTags.getRange(linha, TAGS_COL_PRECISAO).setValue(gpsText_(accuracy));
+
+  return { ok:true };
+}
+
+// ================= ACTION:event =================
+function registrarEventoNovo_(p) {
+  const tag = String(p.tag || "").trim();
+  const status = String(p.status || "").trim();
+  const confirm = !!p.confirm;
+
+  if (!tag) return { ok:false, error:"TAG vazia." };
+  if (!status) return { ok:false, error:"STATUS vazio." };
+
+  const wsTags = getSheet_(SHEET_TAGS);
+  const linha = acharLinhaPorValor_(wsTags, TAGS_COL_TAG, tag, 2);
+  if (!linha) return { ok:false, error:"TAG nao encontrada em TAGS." };
+
+  const statusAtual = String(wsTags.getRange(linha, TAGS_COL_STATUS).getValue() || "").trim();
+
+  // So pede confirmacao quando sai de CONCLUIDO -> outro
+  const atualEhConcluido = statusAtual.toUpperCase() === "CONCLUIDO";
+  const novoEhDiferente  = statusAtual && (statusAtual !== status);
+  if (atualEhConcluido && novoEhDiferente && !confirm) {
+    return { ok:false, needConfirm:true, lastStatus: statusAtual };
+  }
+
+  const usuario = String(p._login_ok || p.login || "campo").trim() || "campo";
+
+  const ev = {
+    event_id: String(p.event_id || Utilities.getUuid()),
+    timestamp_iso: String(p.timestamp_iso || nowISO_()),
+    tag,
+    status,
+    usuario,
+    lat: (p.lat ?? ""),
+    lon: (p.lon ?? ""),
+    accuracy: (p.accuracy ?? ""),
+    device_id: String(p.device_id || ""),
+    obs: String(p.obs || "")
+  };
+
+  appendEventoNaAba_(ev);
+
+  const up = atualizarTags_(tag, status, usuario, ev.lat, ev.lon, ev.accuracy);
+  if (!up.ok) return up;
+
+  return { ok:true };
+}
+
+// ================= LEGADO (lote) =================
+function processarLoteLegado_(payload) {
+  const eventos = payload.eventos || [];
+  if (!eventos.length) return { ok:true, processed:0, failed:0 };
+
+  let okCount = 0;
+  let failCount = 0;
+
+  for (const evIn of eventos) {
+    try {
+      const tag = String(evIn.tag || "").trim();
+      const status = String(evIn.status || "").trim();
+      if (!tag || !status) { failCount++; continue; }
+
+      const ev = {
+        event_id: String(evIn.event_id || Utilities.getUuid()),
+        timestamp_iso: String(evIn.timestamp_iso || nowISO_()),
+        tag,
+        status,
+        usuario: String(evIn.usuario || payload.usuario || "campo"),
+        lat: (evIn.lat ?? ""),
+        lon: (evIn.lon ?? ""),
+        accuracy: (evIn.accuracy ?? ""),
+        device_id: String(evIn.device_id || payload.device_id || ""),
+        obs: String(evIn.obs || "")
+      };
+
+      appendEventoNaAba_(ev);
+
+      const up = atualizarTags_(tag, status, ev.usuario, ev.lat, ev.lon, ev.accuracy);
+      if (!up.ok) { failCount++; continue; }
+
+      okCount++;
+    } catch (_) {
+      failCount++;
+    }
+  }
+
+  return { ok:true, processed: okCount, failed: failCount };
+}
+
+// ================= BOTOES NA ABA USUARIOS =================
+// Vincule o botao "CRIAR USUARIO" para esta funcao
+function UI_CRIAR_USUARIO() {
+  const ui = SpreadsheetApp.getUi();
+  const nome = ui.prompt("Criar usuario", "Informe o NOME:", ui.ButtonSet.OK_CANCEL);
+  if (nome.getSelectedButton() !== ui.Button.OK) return;
+
+  const sobren = ui.prompt("Criar usuario", "Informe o SOBRENOME (pode ser completo):", ui.ButtonSet.OK_CANCEL);
+  if (sobren.getSelectedButton() !== ui.Button.OK) return;
+
+  const resp = actionUserCreate_({ nome: nome.getResponseText(), sobrenome: sobren.getResponseText() });
+  if (!resp.ok) ui.alert("Erro", resp.error || "Falha", ui.ButtonSet.OK);
+  else ui.alert("OK", `Login: ${resp.login}\nCodigo4: ${resp.codigo4}`, ui.ButtonSet.OK);
+}
+
+// Vincule o botao "RESET SENHA" para esta funcao
+function UI_RESET_CODIGO4() {
+  const ui = SpreadsheetApp.getUi();
+  const login = ui.prompt("Reset codigo4", "Informe o LOGIN (ex: nome.sobrenome):", ui.ButtonSet.OK_CANCEL);
+  if (login.getSelectedButton() !== ui.Button.OK) return;
+
+  const resp = actionUserReset_({ login: login.getResponseText() });
+  if (!resp.ok) ui.alert("Erro", resp.error || "Falha", ui.ButtonSet.OK);
+  else ui.alert("OK", `Login: ${resp.login}\nNovo codigo4: ${resp.codigo4}`, ui.ButtonSet.OK);
+}
