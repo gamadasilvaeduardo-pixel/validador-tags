@@ -1,7 +1,4 @@
 // ====== CONFIG ======
-const APP_BUILD = "2026-01-14-01";
-alert("APP_BUILD: " + APP_BUILD);
-
 const DEFAULT_API_URL = "https://script.google.com/macros/s/SEU_ID/exec";
 const SYNC_MINUTES_DEFAULT = 60;
 
@@ -12,16 +9,14 @@ const state = {
   apiUrl: localStorage.getItem("apiUrl") || DEFAULT_API_URL,
   deviceId: localStorage.getItem("deviceId") || crypto.randomUUID(),
 
-  // sessão
-  login: localStorage.getItem("login") || "",
-  nomeCompleto: localStorage.getItem("nomeCompleto") || "",
-  loggedIn: localStorage.getItem("loggedIn") === "1",
+  // verificação
+  verified: localStorage.getItem("verified") === "1",
+  code6: localStorage.getItem("code6") || "",
 
   base: new Map(), // tag -> {status,setor,classe}
   queue: [],
 
-  // HOLD
-  currentTag: null,
+  currentTag: null, // HOLD
   allowActions: false,
 
   cam: {
@@ -62,7 +57,7 @@ function loadBaseCache() {
   catch { state.base = new Map(); }
 }
 
-// ====== AUTH / API ======
+// ====== AUTH (codigo 6d) ======
 async function apiPostJson(payload) {
   const res = await fetch(state.apiUrl, {
     method: "POST",
@@ -74,29 +69,34 @@ async function apiPostJson(payload) {
   catch { return { ok:false, error:"Resposta invalida do servidor", raw: txt.slice(0,200) }; }
 }
 
-function renderAuthUI() {
-  $("whoami").textContent = state.loggedIn ? (state.login || "-") : "-";
-  $("btnLogout").style.display = state.loggedIn ? "inline-block" : "none";
-  $("appArea").style.display = state.loggedIn ? "block" : "none";
-  $("loginHint").textContent = state.loggedIn ? "Logado." : "Faça login para continuar.";
+function renderAuth() {
+  $("code6").value = state.code6 || "";
+  $("authState").textContent = state.verified ? "VERIFICADO" : "NAO VERIFICADO";
+  $("authState").className = state.verified ? "ok" : "danger";
+  $("btnSair").style.display = state.verified ? "inline-block" : "none";
+  $("appArea").style.display = state.verified ? "block" : "none";
 }
 
-function logout() {
-  state.loggedIn = false;
-  state.login = "";
-  state.nomeCompleto = "";
-  localStorage.setItem("loggedIn", "0");
-  localStorage.removeItem("login");
-  localStorage.removeItem("nomeCompleto");
-  renderAuthUI();
+async function verificarCodigo() {
+  const code = $("code6").value.trim();
+  if (!/^\d{6}$/.test(code)) return alert("Digite 6 digitos.");
+
+  const resp = await apiPostJson({ action:"verify", code });
+  if (!resp.ok) return alert(resp.error || "Codigo invalido.");
+
+  state.verified = true;
+  state.code6 = code;
+  localStorage.setItem("verified","1");
+  localStorage.setItem("code6", code);
+
+  renderAuth();
+  log("Codigo verificado. App liberado.");
 }
 
-async function doLogin(login, senha) {
-  return await apiPostJson({ action: "login", login, senha });
-}
-
-async function trocarSenha(login, senhaAtual, novaSenha) {
-  return await apiPostJson({ action: "trocar_senha", login, senhaAtual, novaSenha });
+function sair() {
+  state.verified = false;
+  localStorage.setItem("verified","0");
+  renderAuth();
 }
 
 // ====== GEO (virgula) ======
@@ -141,18 +141,12 @@ async function atualizarBase() {
   log(`Base OK. Tags ativas: ${state.base.size}`);
 }
 
-// ====== STATUS ======
+// ====== STATUS / MAP ======
 function normStatus(s) { return String(s || "").trim().toUpperCase().replace(/\s+/g," "); }
 function uiToBaseStatus(ui) {
-  if (ui === "PENDENTE_OBRA") return "PENDENTE OBRA";
-  if (ui === "SEM_ACESSO") return "SEM ACESSO";
+  if (ui === "PENDENTE_OBRA") return "PENDENTE_OBRA"; // mantem como você usa
+  if (ui === "SEM_ACESSO") return "SEM_ACESSO";
   return ui;
-}
-function baseToUiStatus(base) {
-  const s = normStatus(base);
-  if (s === "PENDENTE OBRA") return "PENDENTE_OBRA";
-  if (s === "SEM ACESSO") return "SEM_ACESSO";
-  return s;
 }
 
 // ====== HOLD / UI ======
@@ -184,10 +178,10 @@ function updateActionButtonsForTag(tag) {
 
   // desabilita botao do status atual (se nao pendente)
   if (isCadastrada && !isPendente) {
-    const ui = baseToUiStatus(st);
-    if (ui === "CONCLUIDO") btnConcluido.disabled = true;
-    if (ui === "PENDENTE_OBRA") btnObra.disabled = true;
-    if (ui === "SEM_ACESSO") btnSemAcesso.disabled = true;
+    const cur = st;
+    if (cur === "CONCLUIDO") btnConcluido.disabled = true;
+    if (cur === "PENDENTE_OBRA") btnObra.disabled = true;
+    if (cur === "SEM_ACESSO") btnSemAcesso.disabled = true;
   }
 
   if (!isCadastrada) {
@@ -200,9 +194,9 @@ function showTag(tag) {
   const t = String(tag || "").trim();
   if (!t) return;
 
-  // HOLD
+  // HOLD: não captura outra até ação ou "Ler novamente"
   if (state.currentTag && state.currentTag !== t) {
-    alert(`TAG em atendimento: ${state.currentTag}\nFinalize ou clique "LER NOVAMENTE".`);
+    alert(`TAG em atendimento: ${state.currentTag}\nFinalize ou clique "Ler novamente".`);
     return;
   }
 
@@ -234,49 +228,61 @@ function clearTag() {
   $("acoesBox").style.display = "none";
 }
 
-function lerNovamente() {
-  if (!state.currentTag) return;
-  showTag(state.currentTag);
-}
-
-// ====== EVENT ======
+// ====== EVENT (novo modo com code) ======
 async function criarEvento(novoStatusUI, opts = {}) {
   if (!state.currentTag) return alert("Nenhuma TAG carregada.");
+  if (!state.verified) return alert("Informe o codigo de verificacao.");
 
   const tag = state.currentTag;
   const geo = await getGeo();
-  const statusBase = uiToBaseStatus(String(novoStatusUI || "").trim());
+  const status = uiToBaseStatus(String(novoStatusUI || "").trim());
 
-  const ev = {
+  // monta payload action:event (vai exigir code no backend)
+  const payload = {
+    action: "event",
+    code: state.code6,
     event_id: crypto.randomUUID(),
     timestamp_iso: new Date().toISOString(),
     tag,
-    status: statusBase,
-    usuario: state.login || "campo",
+    status,
+    usuario: "campo",
     lat: geo.lat,
     lon: geo.lon,
     accuracy: geo.accuracy,
     device_id: state.deviceId,
-    obs: opts.obs || ""
+    obs: opts.obs || "",
+    confirm: !!opts.confirm
   };
 
+  // atualiza cache local (pra UI refletir)
   const info = state.base.get(tag);
   if (info) {
-    info.status = statusBase;
+    info.status = status;
     state.base.set(tag, info);
     saveBaseCache();
   }
 
-  state.queue.unshift(ev);
+  // fila offline (mantém seu modo legado de sync)
+  state.queue.unshift({
+    event_id: payload.event_id,
+    timestamp_iso: payload.timestamp_iso,
+    tag,
+    status,
+    usuario: payload.usuario,
+    lat: geo.lat,
+    lon: geo.lon,
+    accuracy: geo.accuracy,
+    device_id: state.deviceId,
+    obs: payload.obs
+  });
   saveQueue();
-  log(`Evento salvo offline: ${tag} -> ${statusBase} (user=${ev.usuario})`);
+  log(`Evento salvo offline: ${tag} -> ${status}`);
 
   clearTag();
 
   if (navigator.onLine) sync().catch(e => log("Erro sync: " + e));
 }
 
-// ====== REGRAS ======
 async function enviarComRegraConfirmacao_(novoStatusUI) {
   if (!state.currentTag) return;
 
@@ -284,6 +290,7 @@ async function enviarComRegraConfirmacao_(novoStatusUI) {
   const info = state.base.get(tag);
 
   if (!info) {
+    // não cadastrada: grava sem confirmação
     await criarEvento(novoStatusUI);
     return;
   }
@@ -291,36 +298,33 @@ async function enviarComRegraConfirmacao_(novoStatusUI) {
   const atual = normStatus(info.status);
   const novo = normStatus(uiToBaseStatus(novoStatusUI));
 
-  // só confirma quando sai de concluido
+  // só confirma quando sai de CONCLUIDO -> outro
   if (atual === "CONCLUIDO" && novo !== "CONCLUIDO") {
-    const ok = confirm(`Confirmar mudanca de status?\nDe: ${info.status}\nPara: ${uiToBaseStatus(novoStatusUI)}`);
+    const ok = confirm(`Confirmar mudanca de status?\nDe: ${info.status}\nPara: ${novoStatusUI}`);
     if (!ok) return;
+    await criarEvento(novoStatusUI, { confirm:true });
+    return;
   }
 
   await criarEvento(novoStatusUI);
 }
 
 async function atualizarGeoloc_() {
-  if (!state.currentTag) return;
-  const info = state.base.get(state.currentTag);
+  const info = state.base.get(state.currentTag || "");
   if (!info) return;
   if (normStatus(info.status) !== "CONCLUIDO") return;
-  await criarEvento("CONCLUIDO", { obs: "ATUALIZAR_GEOLOC" });
+  await criarEvento("CONCLUIDO", { obs:"ATUALIZAR_GEOLOC" });
 }
 
-// ====== SYNC ======
+// ====== SYNC (lote legado no-cors) ======
 async function sync() {
-  if (!navigator.onLine) return log("Sync: sem internet.");
-  if (!state.queue.length) {
-    log("Sync: fila vazia.");
-    setLastSync(new Date().toISOString());
-    return;
-  }
+  if (!navigator.onLine) { log("Sync: sem internet."); return; }
+  if (!state.queue.length) { log("Sync: fila vazia."); setLastSync(new Date().toISOString()); return; }
 
   const batch = state.queue.slice(-50);
   const payload = {
     device_id: state.deviceId,
-    usuario: state.login || "campo",
+    usuario: "campo",
     eventos: batch
   };
 
@@ -343,7 +347,8 @@ function startScheduler() {
   setInterval(() => {
     if (!navigator.onLine) return;
     const last = state.lastSyncAt ? new Date(state.lastSyncAt).getTime() : 0;
-    if ((Date.now() - last) / 60000 >= SYNC_MINUTES_DEFAULT && state.queue.length) {
+    const mins = (Date.now() - last) / 60000;
+    if (mins >= SYNC_MINUTES_DEFAULT && state.queue.length) {
       sync().catch(e => log("Erro sync: " + e));
     }
   }, 60000);
@@ -355,17 +360,27 @@ function startScheduler() {
   window.addEventListener("offline", setNet);
 }
 
-// ====== CAMERA ======
+// ====== QR SCAN ======
 async function startCamera() {
   if (state.cam.running) return;
-  if (!("BarcodeDetector" in window)) return alert("Chrome sem BarcodeDetector.");
+
+  if (!("BarcodeDetector" in window)) {
+    alert("Seu Chrome nao suporta BarcodeDetector. Use o campo manual por enquanto.");
+    return;
+  }
 
   state.cam.detector = new BarcodeDetector({ formats: ["qr_code"] });
-  const stream = await navigator.mediaDevices.getUserMedia({ video:{ facingMode:"environment" }, audio:false });
+
+  const stream = await navigator.mediaDevices.getUserMedia({
+    video: { facingMode: "environment" },
+    audio: false
+  });
+
   state.cam.stream = stream;
   const video = $("video");
   video.srcObject = stream;
   await video.play();
+
   state.cam.running = true;
   log("Camera iniciada.");
   scanLoop();
@@ -383,31 +398,46 @@ async function scanLoop() {
   const video = $("video");
   while (state.cam.running) {
     try {
-      const codes = await state.cam.detector.detect(video);
-      if (codes && codes.length) {
-        const val = String(codes[0].rawValue || "").trim();
+      const barcodes = await state.cam.detector.detect(video);
+      if (barcodes && barcodes.length) {
+        const val = String(barcodes[0].rawValue || "").trim();
         const now = Date.now();
         if (val && (val !== state.cam.lastValue || (now - state.cam.lastAt) > 2000)) {
           state.cam.lastValue = val;
           state.cam.lastAt = now;
-          if (state.currentTag && state.currentTag !== val) {
-            log(`QR ignorado (HOLD): ${val}`);
-          } else {
-            log("QR lido: " + val);
-            showTag(val);
-          }
+          log("QR lido: " + val);
+          showTag(val);
         }
       }
-    } catch {}
+    } catch (e) {}
     await new Promise(r => setTimeout(r, 250));
   }
 }
 
+// ====== PWA INSTALL ======
+let deferredPrompt = null;
+window.addEventListener("beforeinstallprompt", (e) => {
+  e.preventDefault();
+  deferredPrompt = e;
+  $("btnInstall").style.display = "inline-block";
+});
+$("btnInstall")?.addEventListener("click", async () => {
+  if (!deferredPrompt) return;
+  deferredPrompt.prompt();
+  await deferredPrompt.userChoice;
+  deferredPrompt = null;
+  $("btnInstall").style.display = "none";
+});
+
 // ====== INIT ======
 async function init() {
   if ("serviceWorker" in navigator) {
-    try { await navigator.serviceWorker.register("sw.js"); log("SW ok."); }
-    catch (e) { log("Falha SW: " + e); }
+    try {
+      await navigator.serviceWorker.register("sw.js");
+      log("Service Worker registrado (offline).");
+    } catch (e) {
+      log("Falha SW: " + e);
+    }
   }
 
   $("apiUrl").value = state.apiUrl;
@@ -417,45 +447,11 @@ async function init() {
   loadQueue();
   loadBaseCache();
   setLastSync(state.lastSyncAt);
-  renderAuthUI();
 
-  $("btnLogin").onclick = async () => {
-    const login = $("loginUser").value.trim().toLowerCase();
-    const senha = $("loginPass").value;
-    if (!login || !senha) return alert("Informe login e senha.");
-
-    const resp = await doLogin(login, senha);
-    if (!resp.ok) {
-      alert(resp.error || "Falha no login.");
-      return;
-    }
-
-    state.loggedIn = true;
-    state.login = resp.login || login;
-    state.nomeCompleto = resp.nomeCompleto || "";
-    localStorage.setItem("loggedIn","1");
-    localStorage.setItem("login",state.login);
-    localStorage.setItem("nomeCompleto",state.nomeCompleto);
-
-    renderAuthUI();
-
-    if (resp.trocarSenha) {
-      alert("Primeiro acesso: voce deve trocar a senha.");
-    }
-  };
-
-  $("btnLogout").onclick = () => logout();
-
-  $("btnTrocarSenha").onclick = async () => {
-    const atual = $("senhaAtual").value;
-    const nova = $("senhaNova").value;
-    if (!atual || !nova) return alert("Preencha as duas senhas.");
-    const resp = await trocarSenha(state.login, atual, nova);
-    if (!resp.ok) return alert(resp.error || "Falha ao trocar senha.");
-    $("senhaAtual").value = "";
-    $("senhaNova").value = "";
-    alert("Senha trocada com sucesso.");
-  };
+  // auth
+  renderAuth();
+  $("btnVerificar").onclick = () => verificarCodigo().catch(e => alert(String(e)));
+  $("btnSair").onclick = () => sair();
 
   $("btnSalvarApi").onclick = () => {
     state.apiUrl = $("apiUrl").value.trim() || DEFAULT_API_URL;
@@ -465,11 +461,12 @@ async function init() {
 
   $("btnAtualizarBase").onclick = async () => {
     try { await atualizarBase(); }
-    catch (e) { log("Erro base: " + e); alert("Erro ao baixar base."); }
+    catch (e) { log("Erro base: " + e); alert("Erro ao baixar base. Veja o log."); }
   };
 
-  $("btnSync").onclick = () => sync().catch(e => log("Erro sync: " + e));
-  $("btnStartCam").onclick = () => startCamera();
+  $("btnSync").onclick = () => sync().catch(e => { log("Erro sync: " + e); alert("Erro sync. Veja log."); });
+
+  $("btnStartCam").onclick = () => startCamera().catch(e => { log("Erro camera: " + e); alert("Erro camera: " + e); });
   $("btnStopCam").onclick = () => stopCamera();
 
   $("btnCarregarManual").onclick = () => {
@@ -477,13 +474,15 @@ async function init() {
     if (t) showTag(t);
   };
 
-  $("btnLerNovamente").onclick = () => lerNovamente();
+  $("btnLerNovamente").onclick = () => clearTag();
+
   $("btnGeo").onclick = () => atualizarGeoloc_();
 
   document.querySelectorAll("button[data-status]").forEach(btn => {
     btn.addEventListener("click", async () => {
       if (!state.allowActions) return;
-      await enviarComRegraConfirmacao_(btn.getAttribute("data-status"));
+      const status = btn.getAttribute("data-status");
+      await enviarComRegraConfirmacao_(status);
     });
   });
 
@@ -492,4 +491,3 @@ async function init() {
 }
 
 init();
-
