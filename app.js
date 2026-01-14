@@ -9,9 +9,10 @@ const state = {
   apiUrl: localStorage.getItem("apiUrl") || DEFAULT_API_URL,
   deviceId: localStorage.getItem("deviceId") || crypto.randomUUID(),
 
-  // verificação
-  verified: localStorage.getItem("verified") === "1",
-  code6: localStorage.getItem("code6") || "",
+  // auth (login + codigo4)
+  logged: localStorage.getItem("logged") === "1",
+  login: localStorage.getItem("login") || "",
+  codigo4: localStorage.getItem("codigo4") || "",
 
   base: new Map(), // tag -> {status,setor,classe}
   queue: [],
@@ -57,7 +58,7 @@ function loadBaseCache() {
   catch { state.base = new Map(); }
 }
 
-// ====== AUTH (codigo 6d) ======
+// ====== API POST ======
 async function apiPostJson(payload) {
   const res = await fetch(state.apiUrl, {
     method: "POST",
@@ -69,33 +70,42 @@ async function apiPostJson(payload) {
   catch { return { ok:false, error:"Resposta invalida do servidor", raw: txt.slice(0,200) }; }
 }
 
+// ====== AUTH (login + codigo4) ======
 function renderAuth() {
-  $("code6").value = state.code6 || "";
-  $("authState").textContent = state.verified ? "VERIFICADO" : "NAO VERIFICADO";
-  $("authState").className = state.verified ? "ok" : "danger";
-  $("btnSair").style.display = state.verified ? "inline-block" : "none";
-  $("appArea").style.display = state.verified ? "block" : "none";
+  $("login").value = state.login || "";
+  $("codigo4").value = state.codigo4 || "";
+  $("authState").textContent = state.logged ? "LOGADO" : "NAO LOGADO";
+  $("authState").className = state.logged ? "ok" : "danger";
+  $("btnSair").style.display = state.logged ? "inline-block" : "none";
+  $("appArea").style.display = state.logged ? "block" : "none";
+  $("who").textContent = state.logged ? state.login : "-";
 }
 
-async function verificarCodigo() {
-  const code = $("code6").value.trim();
-  if (!/^\d{6}$/.test(code)) return alert("Digite 6 digitos.");
+async function entrar() {
+  const login = $("login").value.trim().toLowerCase();
+  const codigo4 = $("codigo4").value.trim();
 
-  const resp = await apiPostJson({ action:"verify", code });
-  if (!resp.ok) return alert(resp.error || "Codigo invalido.");
+  if (!login) return alert("Informe o login (nome.ultimosobrenome).");
+  if (!/^\d{4}$/.test(codigo4)) return alert("Digite 4 digitos.");
 
-  state.verified = true;
-  state.code6 = code;
-  localStorage.setItem("verified","1");
-  localStorage.setItem("code6", code);
+  const resp = await apiPostJson({ action:"login", login, codigo4 });
+  if (!resp.ok) return alert(resp.error || "Login invalido.");
+
+  state.logged = true;
+  state.login = login;
+  state.codigo4 = codigo4;
+
+  localStorage.setItem("logged","1");
+  localStorage.setItem("login", login);
+  localStorage.setItem("codigo4", codigo4);
 
   renderAuth();
-  log("Codigo verificado. App liberado.");
+  log("Login OK: " + login);
 }
 
 function sair() {
-  state.verified = false;
-  localStorage.setItem("verified","0");
+  state.logged = false;
+  localStorage.setItem("logged","0");
   renderAuth();
 }
 
@@ -144,7 +154,7 @@ async function atualizarBase() {
 // ====== STATUS / MAP ======
 function normStatus(s) { return String(s || "").trim().toUpperCase().replace(/\s+/g," "); }
 function uiToBaseStatus(ui) {
-  if (ui === "PENDENTE_OBRA") return "PENDENTE_OBRA"; // mantem como você usa
+  if (ui === "PENDENTE_OBRA") return "PENDENTE_OBRA";
   if (ui === "SEM_ACESSO") return "SEM_ACESSO";
   return ui;
 }
@@ -170,13 +180,9 @@ function updateActionButtonsForTag(tag) {
   const isPendente = (st === "PENDENTE");
   const isConcluido = (st === "CONCLUIDO");
 
-  // pendente só quando status != pendente
   btnPendente.style.display = (isCadastrada && !isPendente) ? "inline-block" : "none";
-
-  // atualizar geoloc só quando concluido
   btnGeo.style.display = (isCadastrada && isConcluido) ? "inline-block" : "none";
 
-  // desabilita botao do status atual (se nao pendente)
   if (isCadastrada && !isPendente) {
     const cur = st;
     if (cur === "CONCLUIDO") btnConcluido.disabled = true;
@@ -194,7 +200,6 @@ function showTag(tag) {
   const t = String(tag || "").trim();
   if (!t) return;
 
-  // HOLD: não captura outra até ação ou "Ler novamente"
   if (state.currentTag && state.currentTag !== t) {
     alert(`TAG em atendimento: ${state.currentTag}\nFinalize ou clique "Ler novamente".`);
     return;
@@ -228,24 +233,23 @@ function clearTag() {
   $("acoesBox").style.display = "none";
 }
 
-// ====== EVENT (novo modo com code) ======
+// ====== EVENT (novo modo com login/codigo4) ======
 async function criarEvento(novoStatusUI, opts = {}) {
   if (!state.currentTag) return alert("Nenhuma TAG carregada.");
-  if (!state.verified) return alert("Informe o codigo de verificacao.");
+  if (!state.logged) return alert("Faca login.");
 
   const tag = state.currentTag;
   const geo = await getGeo();
   const status = uiToBaseStatus(String(novoStatusUI || "").trim());
 
-  // monta payload action:event (vai exigir code no backend)
   const payload = {
     action: "event",
-    code: state.code6,
+    login: state.login,
+    codigo4: state.codigo4,
     event_id: crypto.randomUUID(),
     timestamp_iso: new Date().toISOString(),
     tag,
     status,
-    usuario: "campo",
     lat: geo.lat,
     lon: geo.lon,
     accuracy: geo.accuracy,
@@ -254,7 +258,7 @@ async function criarEvento(novoStatusUI, opts = {}) {
     confirm: !!opts.confirm
   };
 
-  // atualiza cache local (pra UI refletir)
+  // UI cache
   const info = state.base.get(tag);
   if (info) {
     info.status = status;
@@ -262,13 +266,13 @@ async function criarEvento(novoStatusUI, opts = {}) {
     saveBaseCache();
   }
 
-  // fila offline (mantém seu modo legado de sync)
+  // fila offline (legado)
   state.queue.unshift({
     event_id: payload.event_id,
     timestamp_iso: payload.timestamp_iso,
     tag,
     status,
-    usuario: payload.usuario,
+    usuario: state.login,
     lat: geo.lat,
     lon: geo.lon,
     accuracy: geo.accuracy,
@@ -281,6 +285,21 @@ async function criarEvento(novoStatusUI, opts = {}) {
   clearTag();
 
   if (navigator.onLine) sync().catch(e => log("Erro sync: " + e));
+
+  // tenta enviar imediato (modo novo)
+  if (navigator.onLine) {
+    const resp = await apiPostJson(payload);
+    if (!resp.ok && resp.needConfirm) {
+      const ok = confirm(`Confirmar mudanca de status?\nDe: ${resp.lastStatus}\nPara: ${status}`);
+      if (ok) {
+        payload.confirm = true;
+        const r2 = await apiPostJson(payload);
+        if (!r2.ok) log("Erro server: " + (r2.error || "falha"));
+      }
+    } else if (!resp.ok) {
+      log("Erro server: " + (resp.error || "falha"));
+    }
+  }
 }
 
 async function enviarComRegraConfirmacao_(novoStatusUI) {
@@ -290,7 +309,6 @@ async function enviarComRegraConfirmacao_(novoStatusUI) {
   const info = state.base.get(tag);
 
   if (!info) {
-    // não cadastrada: grava sem confirmação
     await criarEvento(novoStatusUI);
     return;
   }
@@ -298,7 +316,6 @@ async function enviarComRegraConfirmacao_(novoStatusUI) {
   const atual = normStatus(info.status);
   const novo = normStatus(uiToBaseStatus(novoStatusUI));
 
-  // só confirma quando sai de CONCLUIDO -> outro
   if (atual === "CONCLUIDO" && novo !== "CONCLUIDO") {
     const ok = confirm(`Confirmar mudanca de status?\nDe: ${info.status}\nPara: ${novoStatusUI}`);
     if (!ok) return;
@@ -324,7 +341,7 @@ async function sync() {
   const batch = state.queue.slice(-50);
   const payload = {
     device_id: state.deviceId,
-    usuario: "campo",
+    usuario: state.login || "campo",
     eventos: batch
   };
 
@@ -450,7 +467,7 @@ async function init() {
 
   // auth
   renderAuth();
-  $("btnVerificar").onclick = () => verificarCodigo().catch(e => alert(String(e)));
+  $("btnEntrar").onclick = () => entrar().catch(e => alert(String(e)));
   $("btnSair").onclick = () => sair();
 
   $("btnSalvarApi").onclick = () => {
