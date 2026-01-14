@@ -1,4 +1,7 @@
 // ====== CONFIG ======
+const APP_BUILD = "2026-01-14-01";
+alert("APP_BUILD: " + APP_BUILD);
+
 const DEFAULT_API_URL = "https://script.google.com/macros/s/SEU_ID/exec";
 const SYNC_MINUTES_DEFAULT = 60;
 
@@ -489,3 +492,4 @@ async function init() {
 }
 
 init();
+
